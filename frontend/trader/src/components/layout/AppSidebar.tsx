@@ -45,7 +45,7 @@ const NAV_ITEMS: NavEntry[] = [
     key: 'earn',
     children: [
       { label: 'Referral', href: '/referral', icon: Users },
-      { label: 'AI Powered Setting', href: '/fixed-return', icon: Percent },
+      { label: 'AI Powered Staking Program', href: '/fixed-return', icon: Percent },
     ],
   },
   { label: 'Trade Insurance', href: '/insurance', icon: ShieldCheck },

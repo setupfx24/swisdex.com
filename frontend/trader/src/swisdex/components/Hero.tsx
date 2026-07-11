@@ -65,11 +65,13 @@ export function Hero() {
             transition={{ delay: 0.55, duration: 0.6, ease: [0.22, 1, 0.36, 1] }}
             className="mt-4 font-display uppercase tracking-[0.18em] text-sm sm:text-lg md:text-xl text-foreground/85 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 pointer-events-auto"
           >
-            <span>Decentralized Exchange</span>
+            <span>Fast Execution</span>
+            <span aria-hidden className="text-primary">:</span>
+            <span>Deep Liquidity</span>
             <span aria-hidden className="text-primary">:</span>
             <span>Insured Trades</span>
             <span aria-hidden className="text-primary">:</span>
-            <span>AI Powered Setting</span>
+            <span>AI Powered Staking Program</span>
           </motion.h3>
 
           <TypewriterText

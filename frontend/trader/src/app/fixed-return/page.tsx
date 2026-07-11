@@ -78,7 +78,7 @@ export default function FixedReturnPage() {
       setLocks(l || []);
       if (!tenureLabel && c.tenures.length > 0) setTenureLabel(c.tenures[0].label);
     } catch (e: any) {
-      toast.error(e?.message || 'Failed to load AI Powered Setting');
+      toast.error(e?.message || 'Failed to load AI Powered Staking Program');
     } finally {
       setLoading(false);
     }
@@ -192,7 +192,7 @@ export default function FixedReturnPage() {
     <DashboardShell>
       <div className="px-4 sm:px-6 py-6 space-y-6 max-w-[1200px] mx-auto">
         <header>
-          <h1 className="text-2xl font-bold text-text-primary">AI Powered Setting</h1>
+          <h1 className="text-2xl font-bold text-text-primary">AI Powered Staking Program</h1>
           <p className="mt-1 text-sm text-text-secondary max-w-2xl">
             Lock your principal for{' '}
             <strong className="text-text-primary">{cfg.lock_months} months</strong>.

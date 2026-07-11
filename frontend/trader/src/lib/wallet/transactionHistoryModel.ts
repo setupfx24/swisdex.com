@@ -218,14 +218,14 @@ export function transactionTitle(tx: Transaction): string {
 
 function fixedReturnLabel(method: string): string {
   const m = (method || '').toLowerCase();
-  if (m.includes('interest')) return 'AI Powered Setting — Interest';
-  if (m.includes('matured')) return 'AI Powered Setting — Matured';
-  if (m.includes('early_request') || m.includes('early request')) return 'AI Powered Setting — Early withdrawal requested';
-  if (m.includes('early_rejected') || m.includes('early rejected')) return 'AI Powered Setting — Early withdrawal rejected';
-  if (m.includes('early')) return 'AI Powered Setting — Early withdrawal';
-  if (m.includes('grant')) return 'AI Powered Setting — Admin grant';
-  if (m.includes('lock')) return 'AI Powered Setting — Lock';
-  return 'AI Powered Setting';
+  if (m.includes('interest')) return 'AI Powered Staking Program — Interest';
+  if (m.includes('matured')) return 'AI Powered Staking Program — Matured';
+  if (m.includes('early_request') || m.includes('early request')) return 'AI Powered Staking Program — Early withdrawal requested';
+  if (m.includes('early_rejected') || m.includes('early rejected')) return 'AI Powered Staking Program — Early withdrawal rejected';
+  if (m.includes('early')) return 'AI Powered Staking Program — Early withdrawal';
+  if (m.includes('grant')) return 'AI Powered Staking Program — Admin grant';
+  if (m.includes('lock')) return 'AI Powered Staking Program — Lock';
+  return 'AI Powered Staking Program';
 }
 
 export const PAGE_SIZES = [10, 25, 50] as const;

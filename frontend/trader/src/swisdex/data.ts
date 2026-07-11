@@ -41,7 +41,7 @@ export const NAV_ITEMS: NavItem[] = [
     children: [
       { label: 'IB',           href: '/products/ib-referral' },
       { label: 'Referral',     href: '/products/referral' },
-      { label: 'AI Powered Setting', href: '/products/fixed-return-insurance' },
+      { label: 'AI Powered Staking Program', href: '/products/fixed-return-insurance' },
       { label: 'Insurance',    href: '/products/insurance' },
     ],
   },
@@ -102,7 +102,7 @@ export const WHY_US = [
   { icon: 'Network',      title: 'Decentralized Exchange',            body: 'Trade directly from your own wallet with non-custodial, on-chain execution — no intermediaries, no counterparty risk. Your keys, your funds.' },
   { icon: 'ShieldCheck',  title: 'Insurance for Traders',             body: 'Every trade is policy-backed with on-chain insurance. If the market moves against you beyond defined thresholds, your insured amount is protected.' },
   { icon: 'Gift',         title: 'Bonus & Rewards',                   body: 'Get a 100% welcome bonus up to $200 on your first deposit — credited within minutes and fully tradeable on a decentralized exchange with insured trades. Stacks with referral commissions and trading cashback.' },
-  { icon: 'Lock',         title: 'AI Powered Setting',                body: 'Lock in guaranteed AI powered setting yields with our structured investment plans — predictable income with transparent terms and no hidden fees.' },
+  { icon: 'Lock',         title: 'AI Powered Staking Program',                body: 'Lock in guaranteed AI powered staking program yields with our structured investment plans — predictable income with transparent terms and no hidden fees.' },
   { icon: 'Brain',        title: 'AI Trading Software — 90% Accuracy', body: 'Our proprietary AI engine analyses thousands of market signals per second, achieving a verified 90% accuracy rate across forex and crypto pairs.' },
   { icon: 'ShieldPlus',   title: 'Insured Trading',                   body: 'All positions carry built-in trade insurance. Your capital is safeguarded with multi-layer protection — cold storage, encryption, and smart-contract coverage.' },
   { icon: 'Gauge',        title: 'Risk Management',                   body: 'Advanced risk controls including adjustable leverage (up to 1:500), stop-loss automation, margin-call alerts, and real-time exposure monitoring.' },
@@ -168,8 +168,8 @@ export const FAQ = [
     a: 'SwisDex offers a fast web platform accessible from any modern browser, plus dedicated iOS and Android mobile apps. All platforms sync to a single account, so your positions, alerts, and watchlists stay in sync across every device.',
   },
   {
-    q: 'What is AI Powered Setting?',
-    a: 'AI Powered Setting is a capital-protected investment product where you lock your principal for a defined tenure (Month, Quarter, Half-Year, Year, or 2 Year) and earn a known, AI powered setting yield paid at maturity. Returns scale with deposit size and tenure — from 1% per month on a $1K Monthly plan to 7% on a $50K+ 2-Year plan. Your principal is held in a segregated trust account and returned in full at maturity. See the Products → AI Powered Setting page for the full rate matrix.',
+    q: 'What is AI Powered Staking Program?',
+    a: 'AI Powered Staking Program is a capital-protected investment product where you lock your principal for a defined tenure (Month, Quarter, Half-Year, Year, or 2 Year) and earn a known, AI powered staking program yield paid at maturity. Returns scale with deposit size and tenure — from 1% per month on a $1K Monthly plan to 7% on a $50K+ 2-Year plan. Your principal is held in a segregated trust account and returned in full at maturity. See the Products → AI Powered Staking Program page for the full rate matrix.',
   },
   {
     q: 'How does the Decentralized Exchange work?',

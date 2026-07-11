@@ -26,7 +26,7 @@ const RULES: { keys: string[]; reply: string; cta?: { label: string; href: strin
   {
     keys: ['hi', 'hello', 'hey', 'namaste', 'hola', 'good morning', 'good afternoon', 'good evening'],
     reply:
-      "Hi! 👋 I'm SwisBot, your SwisDex assistant. I can help with account types, deposits, the welcome bonus, AI Powered Setting plans, our DEX, insurance, IB program, and more. What would you like to know?",
+      "Hi! 👋 I'm SwisBot, your SwisDex assistant. I can help with account types, deposits, the welcome bonus, AI Powered Staking Program plans, our DEX, insurance, IB program, and more. What would you like to know?",
   },
   {
     keys: ['bonus', 'welcome bonus', '100%', 'promo', 'first deposit bonus'],
@@ -50,9 +50,9 @@ const RULES: { keys: string[]; reply: string; cta?: { label: string; href: strin
     cta: [{ label: 'View all accounts', href: '/account-types' }],
   },
   {
-    keys: ['fixed return', 'fixed-return', 'fixed yield', 'guaranteed return', 'capital protected', 'ai powered setting', 'ai powered', 'ai setting'],
+    keys: ['fixed return', 'fixed-return', 'fixed yield', 'guaranteed return', 'capital protected', 'ai powered staking program', 'ai powered', 'ai setting'],
     reply:
-      'AI Powered Setting plans lock your principal for a defined tenure (Month / Quarter / Half-Year / Year / 2 Year) and pay a known yield at maturity. Bigger deposits and longer tenures earn higher rates — up to 7% on $50K+ 2-Year plans.',
+      'AI Powered Staking Program plans lock your principal for a defined tenure (Month / Quarter / Half-Year / Year / 2 Year) and pay a known yield at maturity. Bigger deposits and longer tenures earn higher rates — up to 7% on $50K+ 2-Year plans.',
     cta: [{ label: 'See rate matrix', href: '/products/fixed-return-insurance' }],
   },
   {
@@ -158,7 +158,7 @@ const QUICK_REPLIES = [
   'Welcome bonus',
   'Minimum deposit',
   'Account types',
-  'AI Powered Setting',
+  'AI Powered Staking Program',
   'Open account',
   'Live agent',
 ];
@@ -168,7 +168,7 @@ const INITIAL: Msg[] = [
     id: 'm0',
     sender: 'bot',
     text:
-      "Hi! 👋 I'm SwisBot. Ask me about the welcome bonus, account types, AI Powered Setting plans, our DEX, insurance, the IB program — or pick a topic below.",
+      "Hi! 👋 I'm SwisBot. Ask me about the welcome bonus, account types, AI Powered Staking Program plans, our DEX, insurance, the IB program — or pick a topic below.",
     ts: Date.now(),
   },
 ];
@@ -187,7 +187,7 @@ function matchRule(input: string): { reply: string; cta?: { label: string; href:
   // Default fallback
   return {
     reply:
-      "I didn't quite catch that — try asking about the welcome bonus, minimum deposit, account types, AI Powered Setting, our DEX, trade insurance, the IB program, or AI trading. Or pick a chip below 👇",
+      "I didn't quite catch that — try asking about the welcome bonus, minimum deposit, account types, AI Powered Staking Program, our DEX, trade insurance, the IB program, or AI trading. Or pick a chip below 👇",
   };
 }
 

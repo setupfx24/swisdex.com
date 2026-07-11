@@ -32,7 +32,7 @@ const columns = {
   ],
   Products: [
     { name: 'IB Referral',              path: '/products/ib-referral' },
-    { name: 'AI Powered Setting',       path: '/products/fixed-return-insurance' },
+    { name: 'AI Powered Staking Program',       path: '/products/fixed-return-insurance' },
   ],
   Company: [
     { name: 'About Us',       path: '/company/about' },

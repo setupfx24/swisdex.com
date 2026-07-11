@@ -80,13 +80,13 @@ export function FixedReturnRateTable({ heading = true }: { heading?: boolean }) 
       {heading && (
         <div className="text-center mb-10">
           <span className="inline-flex items-center gap-2 px-3 py-1 rounded-full liquid-glass text-[11px] uppercase tracking-[0.16em] text-foreground/70">
-            <span className="size-1.5 rounded-full bg-primary" /> AI Powered Setting
+            <span className="size-1.5 rounded-full bg-primary" /> AI Powered Staking Program
           </span>
           <h2 className="mt-5 font-display uppercase text-2xl sm:text-3xl md:text-4xl tracking-tight">
             Return Rates by Tenure &amp; Tier
           </h2>
           <p className="mt-3 text-foreground/65 max-w-xl mx-auto text-sm sm:text-base">
-            Lock your principal for a defined tenure and earn an AI powered setting yield. Bigger deposits and longer
+            Lock your principal for a defined tenure and earn an AI powered staking program yield. Bigger deposits and longer
             lock-ups unlock higher rates.
           </p>
         </div>
