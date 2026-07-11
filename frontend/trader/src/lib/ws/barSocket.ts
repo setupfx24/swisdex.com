@@ -48,6 +48,18 @@ class BarSocket {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private readonly maxReconnectAttempts = 50; // ~quasi-permanent retry
+  // Fires after a RE-connect (not the first connect) so the datafeed can reset
+  // TradingView's bar cache and re-fetch history — heals bars missed while the
+  // socket was down (client 2026-07-03).
+  private _everConnected = false;
+  private _reconnectListeners = new Set<() => void>();
+
+  /** Register a callback fired after the socket RE-connects. Returns an
+   *  unsubscribe function. */
+  onReconnect(cb: () => void): () => void {
+    this._reconnectListeners.add(cb);
+    return () => { this._reconnectListeners.delete(cb); };
+  }
 
   private subKey(symbol: string, resolution: string) {
     return `${symbol.toUpperCase()}:${resolution}`;
@@ -71,6 +83,8 @@ class BarSocket {
 
     ws.onopen = () => {
       this.connecting = false;
+      const wasReconnect = this._everConnected;
+      this._everConnected = true;
       this.reconnectAttempts = 0;
       // Re-subscribe to everything any chart is currently asking for.
       // On a fresh page-load this is empty; on a reconnect it restores state.
@@ -79,6 +93,15 @@ class BarSocket {
         this.send({ type: 'subscribe', symbol, resolution });
       }
       this.startPing();
+      // On a RECONNECT (not the first open), notify listeners so the chart can
+      // re-fetch history and fill any bars missed while the socket was down —
+      // otherwise TradingView leaves a gap at those minutes until a manual
+      // refresh (client 2026-07-03).
+      if (wasReconnect) {
+        for (const cb of this._reconnectListeners) {
+          try { cb(); } catch { /* listener errors must not break the socket */ }
+        }
+      }
     };
 
     ws.onmessage = (event) => {

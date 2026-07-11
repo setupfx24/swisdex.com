@@ -8,10 +8,15 @@ Usage (inside the market-data container):
     python -m src.seed_bars --force         # reseed even if Redis has bars
     python -m src.seed_bars --flush-non-crypto  # drop simulated history first
 
-Crypto symbols: fetches REAL historical klines from Binance public API.
-Non-crypto symbols: fetches REAL historical klines from AllTick REST.
-Falls back to skipping (NOT simulated bars) if AllTick is unavailable —
-serving an empty chart is better than serving believable lies.
+ALL symbols: fetches REAL historical klines from InfoWay REST — the SAME
+provider as the live WebSocket feed — so chart history and live bars share
+one price basis (no boundary seam). infoway_rest routes the host + code per
+asset class (forex/metals/indices/oil → common, crypto → crypto host + USDT,
+US stocks → stock host + .US). Falls back to skipping (NOT simulated bars) if
+InfoWay is unavailable — serving an empty chart is better than believable lies.
+
+Migration note: after switching from AllTick/Binance, run once with --force to
+replace any stale-source bars (esp. old Binance crypto) with InfoWay history.
 """
 import argparse
 import asyncio
@@ -21,6 +26,7 @@ import logging
 import httpx
 
 from packages.common.src.alltick_rest import fetch_klines as alltick_fetch_klines
+from packages.common.src.infoway_rest import fetch_klines as infoway_fetch_klines
 from packages.common.src.config import get_settings
 from packages.common.src.redis_client import redis_client
 
@@ -131,7 +137,7 @@ async def _fetch_binance_klines(symbol: str, tf_name: str, count: int = 500) -> 
     return bars
 
 
-async def seed(force: bool = False):
+async def seed(force: bool = False, ohlc_store=None):
     """Read current prices from Redis and seed historical bars.
 
     For crypto symbols, fetches real bars from Binance public API.
@@ -173,18 +179,31 @@ async def seed(force: bool = False):
     logger.info("Found %d symbols: %s", len(symbols), ", ".join(sorted(symbols)))
 
     settings = get_settings()
-    alltick_token = (settings.ALLTICK_TOKEN or "").strip()
+    infoway_token = (getattr(settings, "INFOWAY_TOKEN", "") or "").strip()
+
+    if not infoway_token:
+        logger.warning("No INFOWAY_TOKEN configured — cannot seed bars")
+        return
+
+    # Free-plan REST budget (60/min): seeding ALL discovered symbols × every TF
+    # blows the cap → HTTP 429 storm that also starves history + gap-fill. Scope
+    # non-crypto seeding to the InfoWay WS symbols (the ones we serve live);
+    # crypto is left as-is (usually already-seeded fast-path, and lives on
+    # Binance). Raise INFOWAY_WS_SYMBOLS on a paid plan. (client 2026-07-09)
+    _ws_syms = {
+        s.strip().upper()
+        for s in (getattr(settings, "INFOWAY_WS_SYMBOLS", "") or "").split(",")
+        if s.strip()
+    }
+    if _ws_syms:
+        before = len(symbols)
+        symbols = {s for s in symbols if _guess_segment(s) == "crypto" or s in _ws_syms}
+        logger.info("Seed scoped to WS symbols + crypto: %d → %d (free-plan rate budget)",
+                    before, len(symbols))
 
     for sym in sorted(symbols):
         segment = _guess_segment(sym)
-        is_crypto = sym in BINANCE_PAIRS
-        source = "binance" if is_crypto else ("alltick" if alltick_token else "skip")
-
-        if not is_crypto and not alltick_token:
-            logger.info("Skipping %s — no ALLTICK_TOKEN configured", sym)
-            continue
-
-        logger.info("Seeding %s (segment=%s, source=%s)", sym, segment, source)
+        logger.info("Seeding %s (segment=%s, source=infoway)", sym, segment)
 
         for tf_name, _tf_seconds in TIMEFRAMES.items():
             list_key = f"bars:{sym}:{tf_name}"
@@ -193,23 +212,28 @@ async def seed(force: bool = False):
                 existing = await redis_client.llen(list_key)
                 if existing >= 100:
                     logger.info("  %s:%s already has %d bars, skipping", sym, tf_name, existing)
+                    # Still backfill the DURABLE store from the Redis bars we
+                    # already have (no extra InfoWay call), so the DB isn't empty
+                    # on the first run of the persistent-bars code.
+                    if ohlc_store is not None:
+                        try:
+                            raw = await redis_client.lrange(list_key, 0, 999)
+                            await ohlc_store.upsert_many(sym, tf_name, [json.loads(r) for r in raw])
+                        except Exception:
+                            pass
                     continue
 
-            if is_crypto:
-                bars = await _fetch_binance_klines(sym, tf_name, BARS_COUNT)
-                if not bars:
-                    logger.warning("  %s:%s Binance fetch returned 0 bars", sym, tf_name)
-                    continue
-            else:
-                # Real history from AllTick REST. If AllTick is down or the
-                # symbol isn't supported, return [] and skip — never fall
-                # back to simulated bars.
-                bars = await alltick_fetch_klines(
-                    sym, tf_name, count=BARS_COUNT, token=alltick_token,
-                )
-                if not bars:
-                    logger.warning("  %s:%s AllTick fetch returned 0 bars", sym, tf_name)
-                    continue
+            # Real history from InfoWay REST — the SAME provider as the live feed,
+            # routed per asset class (forex/metals/indices/oil → common, crypto →
+            # crypto host + USDT, US stocks → stock host + .US). History and live
+            # therefore share one price basis (no seam). If InfoWay is down or the
+            # symbol isn't supported, return [] and skip — never simulated bars.
+            bars = await infoway_fetch_klines(
+                sym, tf_name, count=BARS_COUNT, end_ts=0, token=infoway_token,
+            )
+            if not bars:
+                logger.warning("  %s:%s InfoWay fetch returned 0 bars", sym, tf_name)
+                continue
 
             # Clear old data and write new bars. lpush newest-first to match
             # the BarAggregator's live-write convention (see bar_aggregator.py).
@@ -224,13 +248,16 @@ async def seed(force: bool = False):
                 pipe.lpush(list_key, json.dumps(bar))
             pipe.ltrim(list_key, 0, 999)
             await pipe.execute()
+            # Also persist the backfill to the durable OHLC store (marketdata DB).
+            if ohlc_store is not None:
+                await ohlc_store.upsert_many(sym, tf_name, bars)
             logger.info("  %s:%s → %d bars seeded", sym, tf_name, len(bars))
 
-            # Small delay between requests. AllTick paid plans cap at ~10/s
-            # and the rest module already enforces concurrency + spacing,
-            # but a per-loop sleep keeps any single seed run from monopolising
-            # the rate budget while live ticks are also flowing.
-            await asyncio.sleep(0.15)
+            # Per-request spacing. On the InfoWay FREE plan the cap is 60/min
+            # (1/sec), and the reconcile loop shares it — 0.15s (~400/min) was
+            # the 429 storm. 2s keeps the seed at ~30/min, leaving room for the
+            # reconcile + on-demand getBars. (client 2026-07-09)
+            await asyncio.sleep(2.0)
 
     logger.info("Done seeding all symbols.")
 

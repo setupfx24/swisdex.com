@@ -31,6 +31,12 @@ export default function SpreadsPage() {
   const [rows, setRows] = useState<SpreadRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  // Global spread boost — multiplies EVERY resolved spread by (1 + pct/100)
+  // at read time (backend system settings); rules below are never mutated,
+  // so turning it OFF restores the original values instantly.
+  const [boostOn, setBoostOn] = useState(false);
+  const [boostPct, setBoostPct] = useState<number>(0);
+  const [boostSaving, setBoostSaving] = useState(false);
   const [userSearchKey, setUserSearchKey] = useState<string | null>(null);
   const [userSearchQuery, setUserSearchQuery] = useState('');
   const [userSearchResults, setUserSearchResults] = useState<{ id: string; name: string; email: string }[]>([]);
@@ -38,14 +44,22 @@ export default function SpreadsPage() {
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const [instRes, spreadRes, groupRes] = await Promise.all([
+      const [instRes, spreadRes, groupRes, settingsRes] = await Promise.all([
         adminApi.get<{ items: Instrument[] }>('/config/instruments'),
         adminApi.get<any[]>('/config/spreads'),
         // /admin/account-types returns the AccountGroup list (Standard,
         // ECN, VIP, ...). Used to power the per-account-type dropdown
         // on each rule row. Falls back to empty list if endpoint changes.
         adminApi.get<{ items: AccountGroup[] } | AccountGroup[]>('/account-types').catch(() => ({ items: [] as AccountGroup[] })),
+        // System settings — spread_boost_enabled / spread_boost_percent.
+        adminApi.get<any[]>('/settings').catch(() => [] as any[]),
       ]);
+      const settingsList: { key: string; value: any }[] = Array.isArray(settingsRes) ? settingsRes : [];
+      const sVal = (k: string) => settingsList.find(s => s.key === k)?.value;
+      const rawOn = sVal('spread_boost_enabled');
+      setBoostOn(rawOn === true || rawOn === 'true' || rawOn === 1);
+      const rawPct = parseFloat(String(sVal('spread_boost_percent') ?? ''));
+      setBoostPct(Number.isFinite(rawPct) ? rawPct : 0);
       setInstruments(instRes.items || []);
       const groupsRaw: any = groupRes;
       const groupsList: AccountGroup[] = Array.isArray(groupsRaw)
@@ -123,6 +137,29 @@ export default function SpreadsPage() {
   const selectUser = (key: string, u: { id: string; name: string; email: string }) => {
     setRows(prev => prev.map(r => r._key === key ? { ...r, user_id: u.id, _user_label: `${u.name} (${u.email})` } : r));
     setUserSearchKey(null); setUserSearchQuery(''); setUserSearchResults([]);
+  };
+
+  const saveBoost = async (on: boolean, pct: number) => {
+    if (on && (!Number.isFinite(pct) || pct <= 0)) {
+      toast.error('Enter a percent value above 0 before turning the boost ON.');
+      return;
+    }
+    setBoostSaving(true);
+    try {
+      await adminApi.put('/settings', {
+        settings: { spread_boost_enabled: on, spread_boost_percent: pct },
+      });
+      setBoostOn(on);
+      toast.success(
+        on
+          ? `Spread boost ON — every spread is now +${pct}%`
+          : 'Spread boost OFF — original spreads restored',
+      );
+    } catch (e: any) {
+      toast.error(e.message || 'Failed to save spread boost');
+    } finally {
+      setBoostSaving(false);
+    }
   };
 
   const saveAll = async () => {
@@ -227,6 +264,64 @@ export default function SpreadsPage() {
           <button onClick={saveAll} disabled={saving} className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-buy rounded-md hover:bg-buy-light disabled:opacity-50 transition-fast">
             {saving ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />} Save All
           </button>
+        </div>
+        {/* Global spread boost — read-time multiplier over every rule below. */}
+        <div className="bg-bg-secondary border border-border-primary rounded-md px-4 py-3 flex flex-wrap items-center gap-4">
+          <div className="min-w-[220px]">
+            <h3 className="text-xs font-semibold text-text-primary">Global Spread Boost</h3>
+            <p className="text-xxs text-text-tertiary mt-0.5">
+              ON: every spread below increases by this percent (display + fills). OFF: original values return. Rules are never modified.
+            </p>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <input
+              type="number"
+              step="1"
+              min="0"
+              value={boostPct}
+              onChange={e => setBoostPct(parseFloat(e.target.value) || 0)}
+              className="w-20 px-2 py-1 text-xs bg-bg-input border border-border-primary rounded font-mono tabular-nums text-text-primary"
+              title="Percent to increase all spreads by"
+            />
+            <span className="text-xs text-text-secondary">%</span>
+          </div>
+          <div className="flex items-center gap-3">
+            <label className="flex items-center gap-1.5 text-xs text-text-primary cursor-pointer">
+              <input
+                type="radio"
+                name="spread-boost"
+                checked={boostOn}
+                disabled={boostSaving}
+                onChange={() => saveBoost(true, boostPct)}
+                className="accent-buy"
+              />
+              On
+            </label>
+            <label className="flex items-center gap-1.5 text-xs text-text-primary cursor-pointer">
+              <input
+                type="radio"
+                name="spread-boost"
+                checked={!boostOn}
+                disabled={boostSaving}
+                onChange={() => saveBoost(false, boostPct)}
+                className="accent-buy"
+              />
+              Off
+            </label>
+          </div>
+          {boostOn && (
+            <div className="flex items-center gap-2">
+              <span className="text-xxs font-semibold text-buy border border-buy/40 rounded px-2 py-0.5">ACTIVE +{boostPct}%</span>
+              <button
+                onClick={() => saveBoost(true, boostPct)}
+                disabled={boostSaving}
+                className="text-xxs font-medium text-text-secondary border border-border-primary rounded px-2 py-0.5 hover:bg-bg-hover transition-fast disabled:opacity-50"
+                title="Save a changed percent while the boost stays on"
+              >
+                {boostSaving ? 'Saving…' : 'Update %'}
+              </button>
+            </div>
+          )}
         </div>
         {renderTable('Default (All Instruments)', globalRows, 'default')}
         {renderTable('Per Segment (e.g. Forex / Metals / Crypto — applies to every instrument in that segment)', segmentRows, 'segment')}

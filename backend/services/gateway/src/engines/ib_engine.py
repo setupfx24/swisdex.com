@@ -120,7 +120,7 @@ async def compute_ib_qualification(db: AsyncSession, ib_profile_id: UUID) -> tup
     the IB's referred users.
     """
     from packages.common.src.models import (
-        User, TradeHistory, TradingAccount, Deposit,
+        User, TradeHistory, TradingAccount, Deposit, Transaction,
     )
     from packages.common.src.settings_store import get_int_setting, get_bool_setting
 
@@ -132,14 +132,25 @@ async def compute_ib_qualification(db: AsyncSession, ib_profile_id: UUID) -> tup
     if not referred_ids:
         return 0, Decimal("0")
 
-    # Cumulative deposit amount brought by all referrals.
-    amount_raw = (await db.execute(
+    # Cumulative funded amount brought by all referrals — approved deposits PLUS
+    # admin manual credits (Transaction type 'adjustment', positive). Must match
+    # business_service._ib_pool_and_active so the tier the engine pays on equals
+    # what the IB sees on /business (client 2026-06-30: deposits + admin credits
+    # both drive the tier).
+    deposits_amt = (await db.execute(
         select(func.coalesce(func.sum(Deposit.amount), 0)).where(
             Deposit.user_id.in_(referred_ids),
             Deposit.status.in_(["approved", "auto_approved"]),
         )
     )).scalar() or 0
-    amount = Decimal(str(amount_raw))
+    credits_amt = (await db.execute(
+        select(func.coalesce(func.sum(Transaction.amount), 0)).where(
+            Transaction.user_id.in_(referred_ids),
+            Transaction.type == "adjustment",
+            Transaction.amount > 0,
+        )
+    )).scalar() or 0
+    amount = Decimal(str(deposits_amt)) + Decimal(str(credits_amt))
 
     # Activations: referrals with >= min_trades closed trades, and (when
     # the admin toggle is on) KYC-approved. Both the trade count and the

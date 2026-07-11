@@ -81,6 +81,12 @@ class TradingAccount(Base):
     currency = Column(String(5), default="USD")
     is_demo = Column(Boolean, default=False)
     is_active = Column(Boolean, default=True)
+    # Promotional/pilot account (client 2026-07-02): a real-looking account the
+    # admin funds for marketing/showcase. Everything shows on the USER's own
+    # dashboard as normal, but its activity (trades, deposits, withdrawals) and
+    # the owner's user-scoped promo activity (FR, referral, IB) are EXCLUDED from
+    # admin's real company financials so they never pollute the broker's numbers.
+    is_promotional = Column(Boolean, default=False, server_default="false", nullable=False)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
 

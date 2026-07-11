@@ -619,6 +619,18 @@ class CopyTradeEngine:
             investor_account.margin_used = max(
                 Decimal("0"), (investor_account.margin_used or Decimal("0")) - margin_release
             )
+            # Negative Balance Protection for MAM/copy investors — a follower can
+            # never lose more than their account holds; the broker absorbs any
+            # residual (client 2026-06-19). Caps the investor's loss at their
+            # own balance instead of letting a master's blow-up push them
+            # negative.
+            if investor_account.balance < Decimal("0"):
+                logger.warning(
+                    "NBP: absorbing %.2f negative balance on copy-investor account %s",
+                    float(-investor_account.balance),
+                    getattr(investor_account, "account_number", investor_account.id),
+                )
+                investor_account.balance = Decimal("0")
             investor_account.equity = investor_account.balance + (investor_account.credit or Decimal("0"))
             investor_account.free_margin = investor_account.equity - investor_account.margin_used
 

@@ -89,11 +89,28 @@ async def quote(
     # apply (admin sets these on /admin/insurance for Micro/Standard/Pro
     # /Elite accounts independently of the global per_lot_fee).
     acct_group_id = None
+    acct_number = ""
+    acct_is_demo = False
     acct_row = (await db.execute(
-        select(TradingAccount.account_group_id).where(TradingAccount.id == req.account_id)
+        select(TradingAccount.account_group_id, TradingAccount.account_number, TradingAccount.is_demo).where(TradingAccount.id == req.account_id)
     )).first()
     if acct_row is not None:
         acct_group_id = acct_row[0]
+        acct_number = (acct_row[1] or "")
+        acct_is_demo = bool(acct_row[2])
+
+    # Demo accounts can't buy Trade Insurance — return no tiers so the picker
+    # shows nothing (root fix for demo insurance fees, client 2026-06-25).
+    if acct_is_demo:
+        return []
+
+    # PAMM / MAM insurance gate (client 2026-06-25). PAMM/MAM pool + managed
+    # sub-accounts (account numbers prefixed IF/CF/PM/MM/CT) can only insure
+    # trades when the admin enables `pamm_mam_insurance_enabled` (default off).
+    if acct_number.upper().startswith(("IF", "CF", "PM", "MM", "CT")):
+        from packages.common.src.settings_store import get_bool_setting
+        if not await get_bool_setting("pamm_mam_insurance_enabled", False):
+            raise HTTPException(status_code=409, detail="insurance_disabled_for_pamm_mam")
 
     # Per-account-type insurance gate (Mig 0070). If admin turned
     # insurance off for this account type, return empty quotes so the
@@ -169,6 +186,19 @@ async def activate(
     )).scalar_one_or_none()
     if acct is None or acct.user_id != user_id:
         raise HTTPException(status_code=403, detail="not_your_position")
+
+    # Demo accounts can't buy Trade Insurance — it's a real-money product and
+    # the demo fee just cluttered the transaction history (client 2026-06-25).
+    if bool(getattr(acct, "is_demo", False)):
+        raise HTTPException(status_code=409, detail="insurance_not_available_on_demo")
+
+    # PAMM / MAM insurance gate (client 2026-06-25) — mirror the /quote check
+    # so a PAMM/MAM pool/managed account can't activate insurance unless admin
+    # enabled pamm_mam_insurance_enabled.
+    if str(acct.account_number or "").upper().startswith(("IF", "CF", "PM", "MM", "CT")):
+        from packages.common.src.settings_store import get_bool_setting
+        if not await get_bool_setting("pamm_mam_insurance_enabled", False):
+            raise HTTPException(status_code=409, detail="insurance_disabled_for_pamm_mam")
 
     # Per-account-type insurance gate (Mig 0070) — hard-block activation
     # if admin disabled insurance for this account's type, even if the

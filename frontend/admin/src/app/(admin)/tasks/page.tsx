@@ -82,12 +82,23 @@ export default function TasksPage() {
   );
 }
 
+// Local YYYY-MM-DD of an ISO timestamp — for the assigned-date range filter.
+function localYmd(iso?: string | null): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 function MyTasks() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
   const [reasonFor, setReasonFor] = useState<string | null>(null);
   const [reason, setReason] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
+  // Custom date-range filter on the ASSIGNED date (created_at).
+  const [fromDate, setFromDate] = useState('');
+  const [toDate, setToDate] = useState('');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -117,9 +128,18 @@ function MyTasks() {
   if (loading) return <div className="flex justify-center py-10"><Loader2 className="animate-spin text-text-tertiary" /></div>;
   if (!tasks.length) return <p className="text-sm text-text-tertiary py-8 text-center">No tasks assigned to you yet.</p>;
 
-  return (
-    <div className="space-y-2">
-      {tasks.map((t) => (
+  const inRange = (t: Task) => {
+    const ymd = localYmd(t.created_at);
+    if (!ymd) return true;
+    if (fromDate && ymd < fromDate) return false;
+    if (toDate && ymd > toDate) return false;
+    return true;
+  };
+  const visible = tasks.filter(inRange);
+  const pendingTasks = visible.filter((t) => t.status === 'pending');
+  const doneTasks = visible.filter((t) => t.status !== 'pending');
+
+  const renderTask = (t: Task) => (
         <div key={t.id} className="rounded-lg border border-border-primary bg-bg-secondary p-3.5">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
@@ -129,28 +149,42 @@ function MyTasks() {
               </div>
               {t.description ? <p className="text-xs text-text-secondary mt-1 leading-relaxed">{t.description}</p> : null}
               <p className="text-[11px] text-text-tertiary mt-1">
-                {t.assigned_by_name ? `By ${t.assigned_by_name}` : ''}{t.due_date ? ` · Due ${t.due_date}` : ''}
+                {[
+                  t.assigned_by_name ? `By ${t.assigned_by_name}` : null,
+                  t.created_at ? `Assigned ${new Date(t.created_at).toLocaleDateString()}` : null,
+                  t.due_date ? `Due ${new Date(t.due_date + 'T12:00:00').toLocaleDateString()}` : null,
+                ].filter(Boolean).join(' · ')}
               </p>
               {t.status === 'undone' && t.undone_reason ? (
                 <p className="text-[11px] text-danger mt-1">Reason: {t.undone_reason}</p>
               ) : null}
             </div>
-            <div className="flex items-center gap-1.5 shrink-0">
-              <button
-                disabled={busy === t.id}
-                onClick={() => mark(t.id, 'done')}
-                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xxs font-medium bg-success/15 text-success border border-success/30 hover:bg-success/25 disabled:opacity-50"
-              >
-                <CheckCircle2 size={13} /> Done
-              </button>
-              <button
-                disabled={busy === t.id}
-                onClick={() => { setReasonFor(reasonFor === t.id ? null : t.id); setReason(t.undone_reason || ''); }}
-                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xxs font-medium bg-danger/15 text-danger border border-danger/30 hover:bg-danger/25 disabled:opacity-50"
-              >
-                <XCircle size={13} /> Undone
-              </button>
-            </div>
+            {/* Once a task is reported (done / undone) the buttons disappear —
+                the status badge + reason show the final report. Only PENDING
+                tasks are actionable (client 2026-06-19). */}
+            {t.status === 'pending' ? (
+              <div className="flex items-center gap-1.5 shrink-0">
+                <button
+                  disabled={busy === t.id}
+                  onClick={() => mark(t.id, 'done')}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xxs font-medium bg-success/15 text-success border border-success/30 hover:bg-success/25 disabled:opacity-50"
+                >
+                  <CheckCircle2 size={13} /> Done
+                </button>
+                <button
+                  disabled={busy === t.id}
+                  onClick={() => { setReasonFor(reasonFor === t.id ? null : t.id); setReason(t.undone_reason || ''); }}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xxs font-medium bg-danger/15 text-danger border border-danger/30 hover:bg-danger/25 disabled:opacity-50"
+                >
+                  <XCircle size={13} /> Undone
+                </button>
+              </div>
+            ) : (
+              <span className="shrink-0 inline-flex items-center gap-1 text-[10px] text-text-tertiary">
+                {t.status === 'done' ? <CheckCircle2 size={12} className="text-success" /> : <XCircle size={12} className="text-danger" />}
+                Reported
+              </span>
+            )}
           </div>
           {reasonFor === t.id && (
             <div className="mt-2 flex items-center gap-2">
@@ -170,7 +204,49 @@ function MyTasks() {
             </div>
           )}
         </div>
-      ))}
+  );
+
+  return (
+    <div className="space-y-4">
+      {/* Custom date filter — assigned date range */}
+      <div className="flex flex-wrap items-end gap-2">
+        <div>
+          <label className="block text-xxs text-text-tertiary mb-1">From date</label>
+          <DateField value={fromDate} onChange={setFromDate} />
+        </div>
+        <div>
+          <label className="block text-xxs text-text-tertiary mb-1">To date</label>
+          <DateField value={toDate} onChange={setToDate} />
+        </div>
+        {(fromDate || toDate) && (
+          <button
+            onClick={() => { setFromDate(''); setToDate(''); }}
+            className="text-xxs text-text-tertiary hover:text-text-primary underline pb-2"
+          >
+            Clear filter
+          </button>
+        )}
+      </div>
+
+      {/* Pending section */}
+      <div className="space-y-2">
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-warning flex items-center gap-1.5">
+          Pending <span className="text-text-tertiary font-normal normal-case">({pendingTasks.length})</span>
+        </h3>
+        {pendingTasks.length
+          ? pendingTasks.map(renderTask)
+          : <p className="text-xs text-text-tertiary py-3 text-center rounded-lg border border-dashed border-border-primary">No pending tasks{fromDate || toDate ? ' in this date range' : ''}.</p>}
+      </div>
+
+      {/* Done / reported section */}
+      <div className="space-y-2">
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-success flex items-center gap-1.5">
+          Done / Reported <span className="text-text-tertiary font-normal normal-case">({doneTasks.length})</span>
+        </h3>
+        {doneTasks.length
+          ? doneTasks.map(renderTask)
+          : <p className="text-xs text-text-tertiary py-3 text-center rounded-lg border border-dashed border-border-primary">No completed tasks{fromDate || toDate ? ' in this date range' : ''}.</p>}
+      </div>
     </div>
   );
 }
@@ -364,7 +440,10 @@ function Reports() {
                   </td>
                   <td className="px-3 py-2"><span className={cn('text-[10px] px-2 py-0.5 rounded-md font-medium uppercase', STATUS_STYLE[t.status])}>{t.status}</span></td>
                   <td className="px-3 py-2 text-danger text-[11px]">{t.status === 'undone' ? (t.undone_reason || '—') : ''}</td>
-                  <td className="px-3 py-2 text-text-tertiary text-[11px]">{t.created_at ? new Date(t.created_at).toLocaleDateString() : ''}</td>
+                  <td className="px-3 py-2 text-text-tertiary text-[11px]">
+                    {t.created_at ? new Date(t.created_at).toLocaleDateString() : ''}
+                    {t.due_date ? <span className="block text-text-tertiary/70">Due {new Date(t.due_date + 'T12:00:00').toLocaleDateString()}</span> : null}
+                  </td>
                 </tr>
               ))}
             </tbody>

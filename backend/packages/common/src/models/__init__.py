@@ -39,7 +39,8 @@ from .trading import (
     AccountGroup, TradingAccount, Order, Position, TradeHistory,
 )
 from .wallet import (
-    BankAccount, Deposit, Withdrawal, Transaction,
+    BankAccount, Deposit, DepositRequest, Withdrawal, Transaction,
+    PaymentMethod, PromotionalExpense, CompanyExpense,
     ChargeConfig, SpreadConfig, SwapConfig,
 )
 from .business import (
@@ -70,7 +71,7 @@ from .staking import (
 from .fixed_return import FixedReturnLock
 from .vip import VipPass
 from .share import SharedTrade
-from .rm import RMFundingRequest
+from .rm import RMFundingRequest, RmManualRequest
 
 
 __all__ = [
@@ -87,7 +88,8 @@ __all__ = [
     # trading
     "AccountGroup", "TradingAccount", "Order", "Position", "TradeHistory",
     # wallet
-    "BankAccount", "Deposit", "Withdrawal", "Transaction",
+    "BankAccount", "Deposit", "DepositRequest", "Withdrawal", "Transaction",
+    "PaymentMethod", "PromotionalExpense", "CompanyExpense",
     "ChargeConfig", "SpreadConfig", "SwapConfig",
     # business
     "IBProfile", "IBApplication", "IBCommissionPlan", "IBCommission", "Referral",
@@ -114,5 +116,5 @@ __all__ = [
     # share
     "SharedTrade",
     # rm
-    "RMFundingRequest",
+    "RMFundingRequest", "RmManualRequest",
 ]

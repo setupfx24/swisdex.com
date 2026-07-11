@@ -16,19 +16,16 @@ import {
   type EconomicImpactLevel,
 } from '@/lib/economic-calendar';
 
-const TradingViewNewsTimeline = dynamic(
-  () => import('@/components/charts/TradingViewNewsTimeline'),
-  {
-    ssr: false,
-    loading: () => (
-      <div className="min-h-[480px] flex items-center justify-center bg-bg-secondary border-t border-border-primary">
-        <Loader2 className="w-10 h-10 animate-spin text-accent" />
-      </div>
-    ),
-  },
-);
-
-const LIVE_SYMBOL_OPTIONS = ['EURUSD', 'GBPUSD', 'USDJPY', 'XAUUSD', 'BTCUSD', 'ETHUSD', 'US500'] as const;
+// In-house live forex headlines (ForexLive / FXStreet), replacing the previous
+// TradingView news timeline embed. (client 2026-07-09)
+const MarketHeadlines = dynamic(() => import('@/components/charts/MarketHeadlines'), {
+  ssr: false,
+  loading: () => (
+    <div className="min-h-[480px] flex items-center justify-center bg-bg-secondary border-t border-border-primary">
+      <Loader2 className="w-10 h-10 animate-spin text-accent" />
+    </div>
+  ),
+});
 
 type ImpactFilter = 'all' | EconomicImpactLevel;
 type NewsMainTab = 'calendar' | 'live';
@@ -106,7 +103,6 @@ export default function EconomicNewsPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [mainTab, setMainTab] = useState<NewsMainTab>('calendar');
-  const [liveSymbol, setLiveSymbol] = useState<string>('EURUSD');
 
   useEffect(() => {
     const t = searchParams.get('tab');
@@ -310,47 +306,8 @@ export default function EconomicNewsPage() {
             >
               {mainTab === 'live' ? (
                 <div className="overflow-hidden border-t border-border-primary">
-                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 px-4 py-3 border-b border-border-primary bg-card">
-                    <div className="flex items-baseline gap-2 min-w-0 flex-wrap">
-                      <span className="font-mono text-lg font-bold text-text-primary tracking-tight">{liveSymbol}</span>
-                      <span className="text-sm text-text-secondary">Top Stories</span>
-                    </div>
-                    <label className="flex items-center gap-2 text-xs text-text-secondary shrink-0">
-                      <span className="text-text-tertiary whitespace-nowrap">Symbol</span>
-                      <select
-                        value={liveSymbol}
-                        onChange={(e) => setLiveSymbol(e.target.value)}
-                        className="accounts-native-select rounded-xl py-2 pl-3 pr-8 text-sm font-mono min-w-[9rem] cursor-pointer border-border-primary bg-bg-secondary"
-                      >
-                        {LIVE_SYMBOL_OPTIONS.map((s) => (
-                          <option key={s} value={s}>
-                            {s}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  </div>
                   <div className="h-[min(72vh,820px)] min-h-[520px] bg-bg-secondary">
-                    <TradingViewNewsTimeline
-                      symbolOverride={liveSymbol}
-                      hideChrome
-                      useDarkEmbed={false}
-                      className="h-full min-h-[520px]"
-                    />
-                  </div>
-                  <div className="px-4 py-2.5 border-t border-border-primary bg-card">
-                    <p className="text-center text-[11px] text-text-secondary leading-relaxed">
-                      Live headlines via{' '}
-                      <a
-                        href="https://www.tradingview.com/"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-accent hover:underline font-medium"
-                      >
-                        TradingView
-                      </a>
-                      . Not investment advice.
-                    </p>
+                    <MarketHeadlines className="h-full min-h-[520px]" />
                   </div>
                 </div>
               ) : null}

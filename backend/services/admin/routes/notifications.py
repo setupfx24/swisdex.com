@@ -67,11 +67,15 @@ async def notifications_summary(
     # Filtering out approvals the *current* admin requested themselves
     # because the rules already block self-approval; surfacing them in the
     # bell would just be noise.
+    # Must match the Approvals page filter exactly (approvals.py list_pending):
+    # status='pending' AND not expired. Without the expires_at guard the bell
+    # counted stale EXPIRED approvals the page hides — "4 in bell, 0 on page".
     approval_q = await db.execute(
         text(
             """
             SELECT COUNT(*) FROM admin_approval_requests
-            WHERE status = 'pending' AND requested_by <> :me
+            WHERE status = 'pending' AND expires_at > NOW()
+              AND requested_by <> :me
             """
         ),
         {"me": str(admin.id)},
@@ -121,16 +125,64 @@ async def notifications_summary(
         fr_withdrawals = 0
         fr_new_locks = 0
 
+    # Trader-submitted "Request to RM" forms (mail-to-RM). Persisted in
+    # rm_manual_requests; admins want a bell ping for each new one so they
+    # don't rely on email alone. Split deposit vs withdraw so the admin knows
+    # the type at a glance. Count only status='new' (unhandled). Own savepoint
+    # so a pre-migration missing table can't poison the session.
+    rm_manual_deposit = 0
+    rm_manual_withdraw = 0
+    try:
+        async with db.begin_nested():
+            rm_manual_rows = await db.execute(
+                text(
+                    "SELECT side, COUNT(*) FROM rm_manual_requests "
+                    "WHERE status = 'new' GROUP BY side"
+                )
+            )
+            for side_val, cnt in rm_manual_rows.all():
+                if (side_val or "").lower() == "withdraw":
+                    rm_manual_withdraw = int(cnt or 0)
+                else:
+                    rm_manual_deposit = int(cnt or 0)
+    except Exception:
+        rm_manual_deposit = 0
+        rm_manual_withdraw = 0
+
+    # Tasks assigned to THIS admin/employee that are still pending — their
+    # personal work queue (client 2026-07-10: employees weren't pinged when a
+    # manager assigned them a task). perm=None → shown to every role; the
+    # count is scoped to the signed-in user so nobody sees anyone else's.
+    my_tasks = 0
+    try:
+        async with db.begin_nested():
+            my_tasks_q = await db.execute(
+                text(
+                    "SELECT COUNT(*) FROM employee_tasks "
+                    "WHERE assigned_to = :me AND status = 'pending'"
+                ),
+                {"me": str(admin.id)},
+            )
+            my_tasks = int(my_tasks_q.scalar() or 0)
+    except Exception:
+        my_tasks = 0
+
     # `link` values are admin-frontend route paths. Withdrawals share the
     # /deposits page (tab=withdrawals); approvals get their own page; the
     # rest map 1:1 to existing routes.
     items = [
+        {"kind": "my_tasks", "count": my_tasks, "perm": None,
+         "label": "Tasks assigned to you", "link": "/tasks", "severity": "critical"},
         {"kind": "withdrawals", "count": pending_withdrawals, "perm": "withdrawals.view",
          "label": "Pending withdrawals", "link": "/deposits?tab=withdrawals", "severity": "critical"},
         {"kind": "approvals",   "count": pending_approvals, "perm": "funds.approve",
          "label": "Approval requests", "link": "/approvals", "severity": "critical"},
         {"kind": "rm_funding",  "count": rm_pending, "perm": "rm.manage",
          "label": "RM funding requests", "link": "/rm-requests", "severity": "critical"},
+        {"kind": "rm_manual_deposit",  "count": rm_manual_deposit, "perm": "rm.manage",
+         "label": "New RM deposit requests", "link": "/rm-manual-requests", "severity": "critical"},
+        {"kind": "rm_manual_withdraw", "count": rm_manual_withdraw, "perm": "rm.manage",
+         "label": "New RM withdrawal requests", "link": "/rm-manual-requests", "severity": "critical"},
         {"kind": "fixed_return_withdrawals", "count": fr_withdrawals, "perm": "fixed_return.view",
          "label": "Fixed-Return withdrawal requests", "link": "/config/fixed-return", "severity": "critical"},
         {"kind": "deposits",    "count": pending_deposits, "perm": "deposits.view",
@@ -151,7 +203,8 @@ async def notifications_summary(
     # platform. super_admin ("*") keeps the full board.
     perms = await resolve_employee_permissions(admin, db)
     if "*" not in perms:
-        items = [i for i in items if i["perm"] in perms]
+        # perm=None marks personal items (e.g. my_tasks) every role keeps.
+        items = [i for i in items if i["perm"] is None or i["perm"] in perms]
 
     # Strip the internal `perm` key from the response (frontend doesn't need it).
     for i in items:

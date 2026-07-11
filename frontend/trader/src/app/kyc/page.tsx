@@ -4,7 +4,6 @@ import { useState, useEffect, useCallback } from 'react';
 import { clsx } from 'clsx';
 import toast from 'react-hot-toast';
 import DashboardShell from '@/components/layout/DashboardShell';
-import { QRCodeCanvas } from 'qrcode.react';
 import api from '@/lib/api/client';
 import {
   ShieldCheck,
@@ -92,6 +91,41 @@ function StatusBadge({ status, kind = 'user' }: { status: string; kind?: 'user' 
       Not Started
     </span>
   );
+}
+
+/**
+ * Phone KYC kept failing (client 2026-06-20): mobile camera photos are often
+ * 5–12 MB and tripped the 10 MB cap / magic-byte check on the server. Re-encode
+ * any picked image to a resized JPEG client-side so it's a clean, small,
+ * server-accepted file. PDFs and undecodable files pass through unchanged.
+ */
+async function prepareKycFile(file: File | null): Promise<File | null> {
+  if (!file) return null;
+  if (!file.type.startsWith('image/')) return file; // PDF etc. — leave as-is
+  try {
+    const bitmap = await createImageBitmap(file);
+    const maxDim = 2000;
+    let { width, height } = bitmap;
+    if (Math.max(width, height) > maxDim) {
+      const scale = maxDim / Math.max(width, height);
+      width = Math.round(width * scale);
+      height = Math.round(height * scale);
+    }
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return file;
+    ctx.drawImage(bitmap, 0, 0, width, height);
+    const blob: Blob | null = await new Promise((res) =>
+      canvas.toBlob((b) => res(b), 'image/jpeg', 0.85),
+    );
+    if (!blob || blob.size === 0) return file;
+    const base = (file.name.replace(/\.[^.]+$/, '') || 'kyc').slice(0, 60);
+    return new File([blob], `${base}.jpg`, { type: 'image/jpeg' });
+  } catch {
+    return file; // browser couldn't decode (rare) — send the original
+  }
 }
 
 export default function KycPage() {
@@ -492,7 +526,7 @@ export default function KycPage() {
                     type="file"
                     accept="image/*,application/pdf"
                     className="hidden"
-                    onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+                    onChange={async (e) => { const f = e.target.files?.[0] ?? null; setFile(await prepareKycFile(f)); }}
                   />
                   {file ? (
                     <span className="text-sm text-accent font-medium break-all text-center">{file.name}</span>
@@ -540,7 +574,7 @@ export default function KycPage() {
                     type="file"
                     accept="image/*,application/pdf"
                     className="hidden"
-                    onChange={(e) => setFile2(e.target.files?.[0] ?? null)}
+                    onChange={async (e) => { const f = e.target.files?.[0] ?? null; setFile2(await prepareKycFile(f)); }}
                   />
                   {file2 ? (
                     <span className="text-xs text-accent font-medium px-2 break-all text-center">{file2.name}</span>
@@ -567,7 +601,7 @@ export default function KycPage() {
                     accept="image/*"
                     capture="user"
                     className="hidden"
-                    onChange={(e) => setFile3(e.target.files?.[0] ?? null)}
+                    onChange={async (e) => { const f = e.target.files?.[0] ?? null; setFile3(await prepareKycFile(f)); }}
                   />
                   {file3 ? (
                     <span className="text-xs text-accent font-medium px-2 break-all text-center">{file3.name}</span>
@@ -575,14 +609,12 @@ export default function KycPage() {
                     <div className="flex flex-col items-center gap-1 text-center py-2">
                       <Camera size={18} className="text-text-tertiary" />
                       <span className="text-xs text-text-secondary">
-                        Take/upload a selfie holding your ID · JPG, PNG, WEBP
+                        Upload a selfie holding your ID · JPG, PNG, WEBP
                       </span>
                     </div>
                   )}
                 </label>
               </div>
-
-              <ContinueOnPhone />
 
               <button
                 type="button"
@@ -610,35 +642,3 @@ export default function KycPage() {
   );
 }
 
-/**
- * "Continue on phone" — shows a QR of the current KYC URL so the user can
- * finish KYC on their phone (better camera). They sign in on the phone and
- * land on the same page (client 2026-06-16, "click with other device").
- */
-function ContinueOnPhone() {
-  const [show, setShow] = useState(false);
-  const url = typeof window !== 'undefined' ? window.location.href : '';
-  return (
-    <div className="pt-1">
-      <button
-        type="button"
-        onClick={() => setShow((s) => !s)}
-        className="text-xs font-medium text-accent hover:underline"
-      >
-        {show ? 'Hide' : 'Continue on another device (phone)'}
-      </button>
-      {show && (
-        <div className="mt-2 flex flex-col items-center gap-2 rounded-xl border border-border-primary bg-card-nested p-4">
-          <p className="text-[11px] text-text-tertiary text-center max-w-xs">
-            Scan with your phone camera, sign in, and finish KYC there using the phone camera.
-          </p>
-          {url ? (
-            <div className="bg-white p-2 rounded-lg">
-              <QRCodeCanvas value={url} size={140} />
-            </div>
-          ) : null}
-        </div>
-      )}
-    </div>
-  );
-}

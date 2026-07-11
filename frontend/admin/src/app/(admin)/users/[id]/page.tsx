@@ -20,7 +20,10 @@ import {
   UserRound,
   Wallet,
   X,
+  Download,
 } from 'lucide-react';
+import { downloadAdminReportPdf } from '@/lib/pdf/adminReportPdf';
+import { usePermissions } from '@/lib/usePermissions';
 
 interface UserDetail {
   user: {
@@ -39,6 +42,8 @@ interface UserDetail {
     // uses these to decide whether to trigger a reset / revoke sessions.
     email_verified?: boolean;
     two_factor_enabled?: boolean;
+    bank_deposit_enabled?: boolean | null;
+    is_promotional?: boolean;
     created_at: string | null;
   };
   accounts: {
@@ -54,6 +59,7 @@ interface UserDetail {
     currency: string;
     is_demo: boolean;
     is_active: boolean;
+    is_promotional?: boolean;
   }[];
   total_deposit: number;
   total_withdrawal: number;
@@ -128,6 +134,87 @@ function RMAssignCard({ userId, currentRmId, currentRmName, onSaved }: {
   );
 }
 
+/** Per-referrer override of the Fixed Return referral commission %. Blank on a
+ *  leg = fall back to the global rate. Hidden if the endpoint 403s. */
+function FrReferralOverrideCard({ userId }: { userId: string }) {
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [info, setInfo] = useState<{
+    mode: string; principal_pct_override: number | null; interest_pct_override: number | null;
+    global_principal_pct: number; global_interest_pct: number;
+  } | null>(null);
+  const [prin, setPrin] = useState('');
+  const [intr, setIntr] = useState('');
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const d = await adminApi.get<any>(`/users/${userId}/fr-referral-override`);
+      setInfo(d);
+      setPrin(d.principal_pct_override != null ? String(d.principal_pct_override) : '');
+      setIntr(d.interest_pct_override != null ? String(d.interest_pct_override) : '');
+    } catch {
+      setInfo(null);
+    } finally {
+      setLoading(false);
+    }
+  }, [userId]);
+  useEffect(() => { load(); }, [load]);
+
+  if (loading || !info) return null;
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      await adminApi.post(`/users/${userId}/fr-referral-override`, {
+        principal_pct: prin.trim() === '' ? null : parseFloat(prin),
+        interest_pct: intr.trim() === '' ? null : parseFloat(intr),
+      });
+      toast.success('Fixed Return referral override saved');
+      load();
+    } catch (e: any) {
+      toast.error(e?.message || 'Failed to save override');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="bg-bg-secondary border border-border-primary rounded-lg p-5">
+      <h2 className="text-base font-bold text-text-primary mb-1">Fixed Return referral commission</h2>
+      <p className="text-xxs text-text-tertiary mb-3">
+        Custom % this user earns for referring Fixed Return (AI Powered Staking) lockers.
+        Leave a field blank to use the global rate. Their payout mode is{' '}
+        <span className="text-text-secondary">{info.mode}</span> (commission applies to that leg).
+      </p>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div>
+          <label className="block text-xxs text-text-tertiary uppercase tracking-wide">Principal % override</label>
+          <input type="number" min="0" max="100" step="0.01" value={prin}
+            onChange={(e) => setPrin(e.target.value)}
+            placeholder={`Global: ${info.global_principal_pct}%`}
+            className="w-full mt-1 py-1.5 px-2 bg-bg-input border border-border-primary rounded-md text-sm text-text-primary" />
+        </div>
+        <div>
+          <label className="block text-xxs text-text-tertiary uppercase tracking-wide">Interest % override</label>
+          <input type="number" min="0" max="100" step="0.01" value={intr}
+            onChange={(e) => setIntr(e.target.value)}
+            placeholder={`Global: ${info.global_interest_pct}%`}
+            className="w-full mt-1 py-1.5 px-2 bg-bg-input border border-border-primary rounded-md text-sm text-text-primary" />
+        </div>
+      </div>
+      <div className="flex items-center gap-3 mt-3">
+        <button onClick={save} disabled={saving}
+          className="text-sm font-medium bg-accent text-white rounded-md px-3 py-1.5 disabled:opacity-50">
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+        <button type="button" onClick={() => { setPrin(''); setIntr(''); }}
+          className="text-xs text-text-tertiary hover:text-text-primary underline">Clear both (use global)</button>
+      </div>
+    </div>
+  );
+}
+
 function kycColor(k: string) {
   switch (k?.toLowerCase()) {
     case 'verified': case 'approved': return 'bg-success/15 text-success';
@@ -141,11 +228,14 @@ export default function UserDetailPage() {
   const params = useParams();
   const router = useRouter();
   const userId = params.id as string;
+  const { can } = usePermissions();
 
   const [data, setData] = useState<UserDetail | null>(null);
   const [deposits, setDeposits] = useState<Array<{ id: string; amount: number; method: string; status: string; created_at: string | null; approved_at: string | null; approved_by: string | null; reference: string | null }>>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [bankBusy, setBankBusy] = useState(false);
+  const [promoBusy, setPromoBusy] = useState(false);
 
   const fetchUser = useCallback(async () => {
     setLoading(true);
@@ -165,6 +255,20 @@ export default function UserDetailPage() {
   }, [userId]);
 
   useEffect(() => { fetchUser(); }, [fetchUser]);
+
+  // Mark/unmark a trading account as promotional (pilot). Promo accounts stay
+  // fully live on the user's own dashboard but are excluded from admin's real
+  // company financials.
+  const togglePromo = async (next: boolean) => {
+    setPromoBusy(true);
+    try {
+      await adminApi.post(`/users/${userId}/promotional`, { is_promotional: next });
+      toast.success(next ? 'User marked promotional' : 'User removed from promotional');
+      await fetchUser();
+    } catch (e: any) {
+      toast.error(e?.message || 'Failed to update');
+    } finally { setPromoBusy(false); }
+  };
 
   if (loading) {
     return (
@@ -192,6 +296,80 @@ export default function UserDetailPage() {
   const { user, accounts, total_deposit, total_withdrawal, total_trades, open_positions } = data;
   const name = [user.first_name, user.last_name].filter(Boolean).join(' ') || user.email.split('@')[0];
 
+  // Full per-user detail report (client 2026-06-20 "user ki poori detail ki
+  // PDF"): profile + totals as headline lines, trading accounts as the table.
+  const exportUserPdf = () => {
+    void downloadAdminReportPdf(
+      `User report — ${name}`,
+      [
+        { header: 'Account', width: 38 },
+        { header: 'Balance', width: 26, align: 'right', mono: true },
+        { header: 'Credit', width: 24, align: 'right', mono: true },
+        { header: 'Equity', width: 26, align: 'right', mono: true },
+        { header: 'Margin used', width: 26, align: 'right', mono: true },
+        { header: 'Leverage', width: 20, align: 'right' },
+        { header: 'Currency', width: 20 },
+      ],
+      accounts.map(a => [
+        a.account_number, `$${fmt(a.balance)}`, `$${fmt(a.credit)}`, `$${fmt(a.equity)}`,
+        `$${fmt(a.margin_used)}`, `1:${a.leverage}`, a.currency,
+      ]),
+      {
+        subtitle: `User: ${name} <${user.email}> | ID: ${user.id}`,
+        summaryLines: [
+          `Email: ${user.email}    Phone: ${user.phone || '-'}`,
+          `Country: ${user.country || '-'}    Address: ${user.address || '-'}`,
+          `Status: ${user.status}    KYC: ${user.kyc_status}    Joined: ${(user.created_at || '').slice(0, 10) || '-'}`,
+          `Total deposits: $${fmt(total_deposit)}    Total withdrawals: $${fmt(total_withdrawal)}`,
+          `Total trades: ${total_trades}    Open positions: ${open_positions}    Accounts: ${accounts.length}`,
+        ],
+        filename: `user-${name.replace(/\s+/g, '-').toLowerCase()}`,
+      },
+    );
+  };
+
+  // #12 (client 2026-06-20): download THIS user's deposit/withdrawal history.
+  // Pulls their money transactions (trades excluded) and renders a PDF.
+  const exportFundingPdf = async () => {
+    try {
+      const res = await adminApi.get<{ items: Array<{ type: string; amount: number; status: string; created_at: string | null; method?: string | null; description?: string | null }> }>(
+        '/transactions', { search: user.email, exclude: 'trading,trade', per_page: '500' },
+      );
+      const items = res?.items || [];
+      if (!items.length) { toast.error('No deposit/withdrawal history for this user'); return; }
+      const completed = items.filter((i) => (i.status || '').toLowerCase() === 'completed');
+      const totIn = completed.filter((i) => /deposit|bonus|commission|credit|fixed_return|transfer_in/i.test(i.type || '')).reduce((s, i) => s + (Number(i.amount) || 0), 0);
+      const totOut = completed.filter((i) => /withdraw|transfer_out|debit/i.test(i.type || '')).reduce((s, i) => s + Math.abs(Number(i.amount) || 0), 0);
+      void downloadAdminReportPdf(
+        `Deposit & withdrawal history - ${name}`,
+        [
+          { header: 'Date', width: 36 },
+          { header: 'Type', width: 30 },
+          { header: 'Method', width: 38 },
+          { header: 'Amount (USD)', width: 28, align: 'right', mono: true },
+          { header: 'Status', width: 24 },
+        ],
+        items.map((i) => [
+          (i.created_at || '').replace('T', ' ').slice(0, 16) || '-',
+          (i.type || '-').replace(/_/g, ' '),
+          i.method || i.description || '-',
+          `$${fmt(Number(i.amount) || 0)}`,
+          i.status || '-',
+        ]),
+        {
+          subtitle: `User: ${name} <${user.email}> | ID: ${user.id}`,
+          summaryLines: [
+            `Rows: ${items.length}`,
+            `Total in (completed): $${fmt(totIn)}    Total out (completed): $${fmt(totOut)}`,
+          ],
+          filename: `user-${name.replace(/\s+/g, '-').toLowerCase()}-funding`,
+        },
+      );
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : 'Could not load history');
+    }
+  };
+
   return (
     <>
       <div className="p-6 space-y-6">
@@ -211,6 +389,10 @@ export default function UserDetailPage() {
               </div>
             </div>
             <div className="flex items-center gap-2">
+              <button type="button" onClick={exportUserPdf} title="Download this user's full detail as PDF"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-border-primary bg-bg-secondary text-text-primary hover:bg-bg-hover transition-fast">
+                <Download size={14} className="text-buy" /> PDF
+              </button>
               <span className={cn('px-3 py-1.5 rounded-lg text-xs font-semibold', statusColor(user.status))}>{user.status}</span>
               <span className={cn('px-3 py-1.5 rounded-lg text-xs font-semibold', kycColor(user.kyc_status))}>KYC: {user.kyc_status}</span>
             </div>
@@ -243,9 +425,22 @@ export default function UserDetailPage() {
           onSaved={fetchUser}
         />
 
+        {/* Per-referrer Fixed Return referral commission % override */}
+        <FrReferralOverrideCard userId={userId} />
+
         {/* Deposit history — how each deposit was made + which admin approved */}
         <div className="bg-bg-secondary border border-border-primary rounded-lg p-5">
-          <h2 className="text-base font-bold text-text-primary mb-4">Deposit history</h2>
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-base font-bold text-text-primary">Deposit history</h2>
+            <button
+              type="button"
+              onClick={exportFundingPdf}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium border border-border-primary bg-bg-base text-text-primary hover:bg-bg-hover transition-fast"
+              title="Download this user's deposit & withdrawal history as PDF"
+            >
+              <Download size={14} className="text-buy" /> Deposit/Withdrawal PDF
+            </button>
+          </div>
           {deposits.length === 0 ? (
             <p className="text-xs text-text-tertiary">No deposits.</p>
           ) : (
@@ -303,14 +498,78 @@ export default function UserDetailPage() {
         {/* Account security & sessions — Reset Password, Revoke, list */}
         <SecurityCard userId={userId} user={user} />
 
-        {/* Fixed Return per-user rate override */}
-        <FixedReturnOverrideCard userId={userId} />
+        {/* Fixed Return — managing these requires fixed_return.manage (client
+            2026-06-20: a normal employee was still able to grant fixed return). */}
+        {can('fixed_return.manage') && (
+          <>
+            <FixedReturnOverrideCard userId={userId} />
+            <FixedReturnGrantCard userId={userId} />
+            <FixedReturnBonusCard userId={userId} />
+          </>
+        )}
 
-        {/* Fixed Return — admin grants a lock to this user with custom terms */}
-        <FixedReturnGrantCard userId={userId} />
+        {/* Per-user bank deposit visibility (client 2026-06-23) */}
+        {can('users.add_fund') && (
+          <div className="bg-bg-secondary border border-border-primary rounded-lg p-5 flex items-center justify-between gap-4">
+            <div className="min-w-0">
+              <h3 className="text-sm font-bold text-text-primary">Bank deposit option</h3>
+              <p className="text-xxs text-text-tertiary mt-0.5">
+                Show the bank/manual deposit option to THIS client. {data.user.bank_deposit_enabled == null
+                  ? 'Currently following the global setting.'
+                  : data.user.bank_deposit_enabled ? 'Enabled for this client.' : 'Hidden for this client.'}
+              </p>
+            </div>
+            <button
+              type="button"
+              disabled={bankBusy}
+              onClick={async () => {
+                setBankBusy(true);
+                try {
+                  const next = !(data.user.bank_deposit_enabled ?? false);
+                  await adminApi.post(`/users/${userId}/bank-deposit`, { enabled: next });
+                  toast.success(`Bank deposit ${next ? 'enabled' : 'disabled'} for this client`);
+                  void fetchUser();
+                } catch (e: unknown) {
+                  toast.error(e instanceof Error ? e.message : 'Failed');
+                } finally {
+                  setBankBusy(false);
+                }
+              }}
+              className={cn('relative w-10 h-5 rounded-full transition-fast shrink-0', data.user.bank_deposit_enabled ? 'bg-success' : 'bg-bg-tertiary border border-border-primary', bankBusy && 'opacity-50')}
+            >
+              <span className={cn('absolute top-0.5 w-4 h-4 rounded-full bg-white transition-fast shadow-sm', data.user.bank_deposit_enabled ? 'left-[22px]' : 'left-0.5')} />
+            </button>
+          </div>
+        )}
 
-        {/* Fixed Return — special bonus (% of principal or flat amount) */}
-        <FixedReturnBonusCard userId={userId} />
+        {/* Whole-user promotional / pilot flag (client 2026-07-03) */}
+        {can('users.add_fund') && (
+          <div className="bg-bg-secondary border border-border-primary rounded-lg p-5 flex items-center justify-between gap-4">
+            <div className="min-w-0">
+              <h3 className="text-sm font-bold text-text-primary">
+                Promotional (pilot) account
+                {data.user.is_promotional && (
+                  <span className="ml-2 px-2 py-0.5 rounded text-xxs font-semibold bg-accent/15 text-accent align-middle">PROMO</span>
+                )}
+              </h3>
+              <p className="text-xxs text-text-tertiary mt-0.5">
+                Mark the WHOLE user as promotional. Everything stays live on their own dashboard,
+                but ALL their activity (every account&apos;s trades / deposits / withdrawals +
+                referral / IB / fixed return) is EXCLUDED from the real company financials.{' '}
+                {data.user.is_promotional ? 'Currently promotional.' : 'Currently a real account.'}
+              </p>
+            </div>
+            <button
+              type="button"
+              disabled={promoBusy}
+              onClick={() => togglePromo(!data.user.is_promotional)}
+              title="Promotional users are excluded from real company financials but fully live on their own dashboard"
+              className={cn('relative w-10 h-5 rounded-full transition-fast shrink-0', data.user.is_promotional ? 'bg-accent' : 'bg-bg-tertiary border border-border-primary', promoBusy && 'opacity-50')}
+            >
+              <span className={cn('absolute top-0.5 w-4 h-4 rounded-full bg-white transition-fast shadow-sm', data.user.is_promotional ? 'left-[22px]' : 'left-0.5')} />
+            </button>
+          </div>
+        )}
 
         {/* Trading Accounts */}
         <div className="bg-bg-secondary border border-border-primary rounded-lg p-5">

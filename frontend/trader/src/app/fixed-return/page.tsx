@@ -6,6 +6,7 @@ import toast from 'react-hot-toast';
 import { Loader2, Lock, AlertTriangle, CheckCircle2, Clock, Calendar } from 'lucide-react';
 
 import DashboardShell from '@/components/layout/DashboardShell';
+import Modal from '@/components/ui/Modal';
 import api from '@/lib/api/client';
 
 interface Tier { label: string; min_amount: number }
@@ -66,6 +67,14 @@ export default function FixedReturnPage() {
   const [withdrawing, setWithdrawing] = useState<string | null>(null);
   const [amount, setAmount] = useState<string>('1000');
   const [tenureLabel, setTenureLabel] = useState<string>('');
+  // Custom in-app confirmation dialog (replaces native window.confirm).
+  const [confirmDialog, setConfirmDialog] = useState<{
+    title: string;
+    message: string;
+    confirmLabel: string;
+    danger?: boolean;
+    onConfirm: () => void;
+  } | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -136,32 +145,76 @@ export default function FixedReturnPage() {
   const minAmount = cfg?.tiers[0]?.min_amount ?? 0;
   const eligible = principal >= minAmount && tenureIdx >= 0;
 
-  const submitLock = async () => {
+  // Open the custom confirmation dialog before committing funds. The Lock
+  // button calls this; submitLock runs only after the user confirms.
+  const requestLock = () => {
     if (!cfg) return;
     if (!eligible) {
       toast.error(`Minimum lock amount is ${fmtUsd(minAmount)}`);
       return;
     }
+    setConfirmDialog({
+      title: 'Confirm your staking lock',
+      message:
+        `• Amount: ${fmtUsd(principal)}\n` +
+        `• Lock period: ${cfg.lock_months} months\n` +
+        `• Payout cycle: ${tenureLabel}\n\n` +
+        `This amount will be locked from your main wallet for the full term. ` +
+        `Early withdrawal carries a ${cfg.early_withdrawal_fee_pct}% penalty and ` +
+        `claws back interest paid to date.`,
+      confirmLabel: `Lock ${fmtUsd(principal)}`,
+      onConfirm: () => submitLock(false),
+    });
+  };
+
+  const submitLock = async (acknowledgeBonusForfeit = false) => {
+    if (!cfg) return;
     setSubmitting(true);
     try {
-      await api.post('/fixed-return/lock', { principal, tenure_label: tenureLabel });
+      await api.post('/fixed-return/lock', {
+        principal,
+        tenure_label: tenureLabel,
+        acknowledge_bonus_forfeit: acknowledgeBonusForfeit,
+      });
       toast.success(`Locked ${fmtUsd(principal)} for ${cfg.lock_months} months`);
       await load();
     } catch (e: any) {
+      // 409 → locking would forfeit the user's bonus. Show a custom warning and
+      // let them agree, then re-submit with acknowledgement (client 2026-06-30).
+      if (e?.status === 409 && !acknowledgeBonusForfeit) {
+        setSubmitting(false);
+        setConfirmDialog({
+          title: 'Bonus will be forfeited',
+          message: `${e?.message || 'Your bonus will be forfeited.'}\n\nDo you agree and want to continue?`,
+          confirmLabel: 'Agree & continue',
+          danger: true,
+          onConfirm: () => submitLock(true),
+        });
+        return;
+      }
       toast.error(e?.message || 'Lock failed');
     } finally {
       setSubmitting(false);
     }
   };
 
-  const withdraw = async (l: LockRow) => {
+  const withdraw = (l: LockRow) => {
     if (!cfg) return;
     const now = Date.now();
-    const matured = l.matures_at && new Date(l.matures_at).getTime() <= now;
-    const msg = matured
-      ? `Mature withdrawal — you'll receive your principal of ${fmtUsd(l.principal)} back. Interest (${fmtUsd(l.total_interest_paid)} so far) was already paid in cycles. Continue?`
-      : `Early withdrawal request:\n• ${cfg.early_withdrawal_fee_pct}% penalty on principal\n• ALL interest paid to date (${fmtUsd(l.total_interest_paid)}) claws back\n\nThe request goes to admin for approval — funds are NOT credited until approved. Projected return after approval: ${fmtUsd(Math.max(0, l.principal * (1 - cfg.early_withdrawal_fee_pct / 100) - l.total_interest_paid))}. Continue?`;
-    if (!window.confirm(msg)) return;
+    const matured = !!(l.matures_at && new Date(l.matures_at).getTime() <= now);
+    const message = matured
+      ? `You'll receive your principal of ${fmtUsd(l.principal)} back. Interest (${fmtUsd(l.total_interest_paid)} so far) was already paid in cycles.`
+      : `Early withdrawal request:\n• ${cfg.early_withdrawal_fee_pct}% penalty on principal\n• ALL interest paid to date (${fmtUsd(l.total_interest_paid)}) claws back\n\nThe request goes to admin for approval — funds are NOT credited until approved. Projected return after approval: ${fmtUsd(Math.max(0, l.principal * (1 - cfg.early_withdrawal_fee_pct / 100) - l.total_interest_paid))}.`;
+    setConfirmDialog({
+      title: matured ? 'Claim your principal' : 'Request early withdrawal',
+      message,
+      confirmLabel: matured ? 'Claim principal' : 'Submit request',
+      danger: !matured,
+      onConfirm: () => doWithdraw(l, matured),
+    });
+  };
+
+  const doWithdraw = async (l: LockRow, matured: boolean) => {
     setWithdrawing(l.id);
     try {
       await api.post(`/fixed-return/locks/${l.id}/withdraw`, {});
@@ -286,7 +339,7 @@ export default function FixedReturnPage() {
             </select>
 
             <button
-              onClick={submitLock}
+              onClick={requestLock}
               disabled={submitting || !eligible}
               className="mt-4 inline-flex items-center justify-center gap-2 w-full px-4 py-2.5 bg-accent text-white font-semibold rounded-md hover:bg-accent/90 disabled:opacity-50 transition-fast"
             >
@@ -341,11 +394,6 @@ export default function FixedReturnPage() {
                 = principal + cumulative interest
               </div>
             </div>
-            <p className="mt-3 text-[11px] text-text-tertiary leading-relaxed">
-              <strong className="text-amber-400">Early withdrawal:</strong>{' '}
-              <strong>{cfg.early_withdrawal_fee_pct}% penalty</strong> on principal AND all interest
-              paid so far claws back from the returned amount.
-            </p>
           </div>
         </section>
 
@@ -481,6 +529,42 @@ export default function FixedReturnPage() {
           )}
         </section>
       </div>
+
+      <Modal
+        open={!!confirmDialog}
+        onClose={() => setConfirmDialog(null)}
+        title={confirmDialog?.title}
+        width="sm"
+      >
+        {confirmDialog && (
+          <div className="space-y-4">
+            <p className="text-sm text-text-secondary whitespace-pre-line leading-relaxed">
+              {confirmDialog.message}
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setConfirmDialog(null)}
+                className="px-4 py-2 text-sm font-medium rounded-md border border-border-primary text-text-secondary hover:bg-bg-hover transition-fast"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  const fn = confirmDialog.onConfirm;
+                  setConfirmDialog(null);
+                  fn();
+                }}
+                className={clsx(
+                  'px-4 py-2 text-sm font-semibold rounded-md text-white transition-fast',
+                  confirmDialog.danger ? 'bg-red-500 hover:bg-red-500/90' : 'bg-accent hover:bg-accent/90',
+                )}
+              >
+                {confirmDialog.confirmLabel}
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
     </DashboardShell>
   );
 }

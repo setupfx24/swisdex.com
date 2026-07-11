@@ -10,6 +10,7 @@ import DashboardShell from '@/components/layout/DashboardShell';
 import DemoLockGate from '@/components/demo/DemoLockGate';
 import { useAuthStore } from '@/stores/authStore';
 import api from '@/lib/api/client';
+import { fmtAccountMoney, isCentAccount, CENT_PER_USD, CENT_SYMBOL } from '@/lib/wallet/centDisplay';
 import WalletDepositModal from '@/components/wallet/WalletDepositModal';
 import P2PMarketplace from '@/components/wallet/P2PMarketplace';
 import {
@@ -40,6 +41,7 @@ interface LiveAccountRow {
   margin_used?: number;
   currency?: string;
   free_margin?: number;
+  is_cent_account?: boolean;
 }
 
 interface WalletData {
@@ -243,14 +245,20 @@ function WalletPageContent() {
   // client-side before the request even leaves the page.
   const [minDeposit, setMinDeposit] = useState(50);
   const [minWithdraw, setMinWithdraw] = useState(70);
+  // Auto crypto withdrawal threshold (0 = off) so the form can tell the user
+  // which withdrawals go out instantly vs need review.
+  const [cryptoAutoMax, setCryptoAutoMax] = useState(0);
   useEffect(() => {
     void (async () => {
       try {
-        const s = await api.get<{ min_deposit_amount_usd?: number; min_withdrawal_amount_usd?: number }>(
+        const s = await api.get<{ min_deposit_amount_usd?: number; min_withdrawal_amount_usd?: number; crypto_auto_withdrawal_enabled?: boolean; crypto_auto_withdrawal_max_usd?: number }>(
           '/auth/platform-status',
         );
         if (typeof s.min_deposit_amount_usd === 'number') setMinDeposit(s.min_deposit_amount_usd);
         if (typeof s.min_withdrawal_amount_usd === 'number') setMinWithdraw(s.min_withdrawal_amount_usd);
+        if (s.crypto_auto_withdrawal_enabled && typeof s.crypto_auto_withdrawal_max_usd === 'number') {
+          setCryptoAutoMax(s.crypto_auto_withdrawal_max_usd);
+        }
       } catch { /* keep defaults */ }
     })();
   }, []);
@@ -262,6 +270,20 @@ function WalletPageContent() {
   const [manualWithdrawNotes, setManualWithdrawNotes] = useState('');
   const [manualWithdrawQrFile, setManualWithdrawQrFile] = useState<File | null>(null);
   const [withdrawSubmitting, setWithdrawSubmitting] = useState(false);
+  // Bank withdrawal: local-currency estimate the user receives for their USD
+  // amount, at the admin-fixed withdrawal rate (informational only).
+  const [withdrawInr, setWithdrawInr] = useState<{ currency: string | null; local_amount: number | null } | null>(null);
+  useEffect(() => {
+    if (fundMainTab !== 'withdraw' || withdrawUiSection !== 'bank') { setWithdrawInr(null); return; }
+    const n = parseFloat(withdrawAmount);
+    if (Number.isNaN(n) || n <= 0) { setWithdrawInr(null); return; }
+    const t = setTimeout(() => {
+      api.get<{ currency: string | null; local_amount: number | null }>(`/wallet/withdraw/fx-quote?amount=${n}`)
+        .then((q) => setWithdrawInr(q && q.local_amount != null ? q : null))
+        .catch(() => setWithdrawInr(null));
+    }, 400);
+    return () => clearTimeout(t);
+  }, [withdrawAmount, withdrawUiSection, fundMainTab]);
 
   /** Compact card transfers: trading ↔ main */
   const [balanceTransfer, setBalanceTransfer] = useState<{
@@ -270,6 +292,9 @@ function WalletPageContent() {
   } | null>(null);
   const [balanceTransferPickId, setBalanceTransferPickId] = useState('');
   const [balanceTransferAmount, setBalanceTransferAmount] = useState('');
+  // Agreement to the credit-forfeit rule when a to-main transfer would drop the
+  // trading balance below its bonus credit (client 2026-06-24).
+  const [transferAgree, setTransferAgree] = useState(false);
   const [balanceTransferBusy, setBalanceTransferBusy] = useState(false);
 
   const fetchData = useCallback(
@@ -603,12 +628,19 @@ function WalletPageContent() {
       const payout = [`[${selectedCryptoWithdraw}]`, detail].join(' ').trim();
       setWithdrawSubmitting(true);
       try {
-        await api.post('/wallet/withdraw', {
+        const res = await api.post<{ status?: string }>('/wallet/withdraw', {
           amount: amt,
           method: CRYPTO_WITHDRAW_METHOD,
           bank_details: { oxapay_payout: payout },
         });
-        toast.success(`Withdrawal of $${amt.toLocaleString()} submitted — pending approval`);
+        // Auto-withdrawals come back "processing" (sent to the payout provider);
+        // manual ones come back "pending" (need admin approval).
+        const isAuto = res?.status === 'processing';
+        toast.success(
+          isAuto
+            ? `Withdrawal of $${amt.toLocaleString()} submitted — processing automatically`
+            : `Withdrawal of $${amt.toLocaleString()} submitted — pending approval`,
+        );
         // Reset so the user can't re-fire the same withdrawal.
         setWithdrawAmount('');
         setWithdrawOxapayDetails('');
@@ -670,6 +702,22 @@ function WalletPageContent() {
     }
   };
 
+  // XM-style pre-deposit confirmation (client 2026-06-20): before a manual /
+  // UPI deposit is submitted, show the "make sure you pay the exact amount and
+  // submit the correct UTR" warning. Confirm then runs the real submit.
+  const [showDepositConfirm, setShowDepositConfirm] = useState(false);
+  const requestDepositConfirm = () => {
+    if (demoFundingBlocked) { toast.error(DEMO_FUNDING_MSG); return; }
+    const amt = parseFloat(depositAmount);
+    if (!amt || amt <= 0) { toast.error('Enter a valid amount'); return; }
+    if (minDeposit > 0 && amt < minDeposit) {
+      toast.error(`Minimum deposit is $${minDeposit.toLocaleString()}.`); return;
+    }
+    if (!depositTxId.trim()) { toast.error('Enter your 12-digit UTR / payment reference'); return; }
+    if (!depositProofFile) { toast.error('Please attach your payment screenshot'); return; }
+    setShowDepositConfirm(true);
+  };
+
   const submitDeposit = async () => {
     if (demoFundingBlocked) {
       toast.error(DEMO_FUNDING_MSG);
@@ -712,7 +760,7 @@ function WalletPageContent() {
           },
         );
         if (resp.payment_url) {
-          toast.success('Redirecting to NOWPayments…');
+          toast.success('Opening secure crypto checkout…');
           window.location.href = resp.payment_url;
           return;
         }
@@ -730,7 +778,12 @@ function WalletPageContent() {
       toast.error('Enter your payment reference');
       return;
     }
-    // Screenshot is OPTIONAL now (XM-style) — finance matches the reference.
+    // Payment screenshot is REQUIRED for manual/bank deposits (client
+    // 2026-06-19) — finance needs proof of the transfer to credit it.
+    if (!depositProofFile) {
+      toast.error('Please attach your payment screenshot');
+      return;
+    }
     setDepositSubmitting(true);
     try {
       const fd = new FormData();
@@ -789,6 +842,9 @@ function WalletPageContent() {
     }
     setBalanceTransfer({ mode: 'to_main', tradingAccountId });
     setBalanceTransferAmount('');
+    // Refresh the account list so a just-created account is selectable without
+    // a manual page refresh (client 2026-06-25).
+    void fetchData(true);
   };
 
   const openTransferFromMain = (tradingAccountId: string | null) => {
@@ -798,6 +854,7 @@ function WalletPageContent() {
     }
     setBalanceTransfer({ mode: 'to_trading', tradingAccountId });
     setBalanceTransferAmount('');
+    void fetchData(true);
     const pick =
       tradingAccountId ??
       (selectedAccountId && liveAccounts.some((a) => a.id === selectedAccountId)
@@ -811,6 +868,7 @@ function WalletPageContent() {
     setBalanceTransfer(null);
     setBalanceTransferAmount('');
     setBalanceTransferBusy(false);
+    setTransferAgree(false);
   };
 
   const submitBalanceTransfer = async () => {
@@ -832,21 +890,32 @@ function WalletPageContent() {
       toast.error('Enter a valid amount');
       return;
     }
+    // Cent accounts display + accept ¢; the backend works in USD. Convert the
+    // entered ¢ amount to USD (÷100) so e.g. ¢500 from a cent account lands as
+    // $5.00 in the main wallet (client 2026-06-23).
+    const txAccount = liveAccounts.find((a) => a.id === tradingId);
+    const txIsCent = isCentAccount(txAccount);
+    const usdAmt = txIsCent ? amt / CENT_PER_USD : amt;
+    const enteredLabel = txIsCent ? `${CENT_SYMBOL}${amt.toLocaleString()}` : `$${amt.toLocaleString()}`;
     setBalanceTransferBusy(true);
     try {
       if (balanceTransfer.mode === 'to_main') {
         await api.post('/wallet/transfer-trading-to-main', {
           from_account_id: tradingId,
-          amount: amt,
+          amount: usdAmt,
         });
-        toast.success(`$${amt.toLocaleString()} moved to main wallet`);
+        toast.success(
+          txIsCent
+            ? `${enteredLabel} moved to main wallet ($${usdAmt.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })})`
+            : `${enteredLabel} moved to main wallet`,
+        );
       } else {
         await api.post('/wallet/transfer-main-to-trading', {
           to_account_id: tradingId,
-          amount: amt,
+          amount: usdAmt,
         });
         const num = liveAccounts.find((a) => a.id === tradingId)?.account_number ?? '';
-        toast.success(`$${amt.toLocaleString()} sent to ${num || 'trading account'}`);
+        toast.success(`${enteredLabel} sent to ${num || 'trading account'}`);
       }
       closeBalanceTransfer();
       void fetchData(true);
@@ -855,6 +924,37 @@ function WalletPageContent() {
       setBalanceTransferBusy(false);
     }
   };
+
+  // Selected account for the transfer modal — drives ¢ vs $ rendering.
+  const transferAccount = balanceTransfer
+    ? liveAccounts.find((a) => a.id === (balanceTransfer.tradingAccountId ?? balanceTransferPickId))
+    : undefined;
+  const transferIsCent = isCentAccount(transferAccount);
+
+  // Credit-forfeit rule (to-main transfers only): the bonus credit must stay
+  // backed by real balance. Work out whether the typed amount would drop the
+  // balance below the credit — if so we warn + require agreement.
+  const transferCreditUsd = Number(transferAccount?.credit) || 0;
+  const transferBalanceUsd = Number(transferAccount?.balance) || 0;
+  const transferAmtUsd = (() => {
+    const v = parseFloat(balanceTransferAmount);
+    if (Number.isNaN(v) || v <= 0) return 0;
+    return transferIsCent ? v / CENT_PER_USD : v;
+  })();
+  const transferWouldForfeit =
+    !!balanceTransfer &&
+    balanceTransfer.mode === 'to_main' &&
+    transferCreditUsd > 0 &&
+    (transferBalanceUsd - transferAmtUsd) < transferCreditUsd;
+  // Heads-up when a to-main transfer would empty the trading account (balance
+  // → 0). Only when there's no bonus credit, since the credit-forfeit block
+  // already warns in that case (client 2026-06-26).
+  const transferWouldEmpty =
+    !!balanceTransfer &&
+    balanceTransfer.mode === 'to_main' &&
+    transferCreditUsd <= 0 &&
+    transferAmtUsd > 0 &&
+    (transferBalanceUsd - transferAmtUsd) <= 0.005;
 
   if (loading) {
     return (
@@ -993,7 +1093,9 @@ function WalletPageContent() {
               {liveAccounts.map((a) => {
                 const cur = a.currency || wallet?.currency || 'USD';
                 const bal = Number(a.balance) || 0;
-                const line = new Intl.NumberFormat('en-US', { style: 'currency', currency: cur }).format(bal);
+                const line = isCentAccount(a)
+                  ? fmtAccountMoney(bal, true)
+                  : new Intl.NumberFormat('en-US', { style: 'currency', currency: cur }).format(bal);
                 const isSel = a.id === selectedAccountId;
                 const num = a.account_number || '';
                 const isManaged = num.startsWith('IF') || num.startsWith('CF');
@@ -1193,7 +1295,14 @@ function WalletPageContent() {
                         <button
                           key={method}
                           type="button"
-                          onClick={() => setDepositUiSection(method)}
+                          onClick={() => {
+                            // Bank / UPI deposit opens the XM-style multi-step
+                            // methods flow (admin-configured QR/UPI/bank per
+                            // method, live INR->USD). Crypto stays inline (client
+                            // 2026-06-24/26).
+                            if (method === 'manual') { router.push('/wallet/deposit/methods'); return; }
+                            setDepositUiSection(method);
+                          }}
                           className={clsx(
                             'px-4 py-2.5 text-sm font-semibold transition-all border-b-2 whitespace-nowrap',
                             active
@@ -1202,9 +1311,9 @@ function WalletPageContent() {
                           )}
                         >
                           {method === 'crypto'
-                            ? 'Crypto (NOWPayments)'
+                            ? 'Crypto'
                             : method === 'manual'
-                            ? 'Manual (Bank)'
+                            ? 'Bank Deposit'
                             : 'Request to RM'}
                         </button>
                       );
@@ -1239,7 +1348,7 @@ function WalletPageContent() {
 
                       <div className="rounded-xl border border-accent/20 bg-accent/5 px-4 py-3">
                         <p className="text-xs text-text-secondary leading-relaxed">
-                          You&apos;ll be redirected to NOWPayments. Choose the coin and network you want to pay with there (USDT on BSC / TRC-20, USDC, BNB, etc.), then send the amount from your wallet (MetaMask, Trust, Binance, etc.). Once the transaction confirms on-chain, your wallet balance is credited automatically.
+                          You&apos;ll be taken to a secure crypto checkout. Choose the coin and network you want to pay with there (USDT on BSC / TRC-20, USDC, BNB, etc.), then send the amount from your wallet (MetaMask, Trust, Binance, etc.). Once the transaction confirms on-chain, your wallet balance is credited automatically.
                         </p>
                       </div>
 
@@ -1275,7 +1384,7 @@ function WalletPageContent() {
                             : 'bg-accent text-white hover:bg-[#5cffb8] shadow-neon-green-lg'
                         )}
                       >
-                        {depositSubmitting ? 'Opening NOWPayments…' : 'Pay with Crypto'}
+                        {depositSubmitting ? 'Opening checkout…' : 'Pay with Crypto'}
                       </button>
                     </>
                   ) : (
@@ -1364,9 +1473,22 @@ function WalletPageContent() {
                                   {manualBankInfo.ifsc_code}
                                 </p>
                               ) : null}
-                              {/* Backend may still surface a `upi_id` field on
-                                  ManualBankDetailsResponse — block its render so
-                                  the visible bank details panel never shows UPI. */}
+                              {manualBankInfo.upi_id ? (
+                                <p className="break-all sm:col-span-2">
+                                  <span className="text-text-tertiary font-sans text-[10px] uppercase tracking-wide">UPI ID — pay here</span>
+                                  <br />
+                                  <span className="inline-flex items-center gap-2">
+                                    <span className="font-bold text-text-primary select-all">{manualBankInfo.upi_id}</span>
+                                    <button
+                                      type="button"
+                                      onClick={() => { navigator.clipboard?.writeText(manualBankInfo.upi_id || ''); toast.success('UPI ID copied'); }}
+                                      className="text-[10px] font-sans font-semibold text-[#55a630] hover:underline"
+                                    >
+                                      Copy
+                                    </button>
+                                  </span>
+                                </p>
+                              ) : null}
                             </div>
                             {manualBankInfo.qr_code_url ? (
                               <div className="pt-1 flex justify-center">
@@ -1406,7 +1528,7 @@ function WalletPageContent() {
                       </div>
                       <div className="space-y-1 min-w-0">
                         <label className="text-xs text-text-secondary">
-                          Payment screenshot <span className="text-text-tertiary font-normal">(optional)</span>
+                          Payment screenshot <span className="text-danger">*</span>
                         </label>
                         <label
                           className={clsx(
@@ -1447,7 +1569,7 @@ function WalletPageContent() {
                       </div>
                       <button
                         type="button"
-                        onClick={() => void submitDeposit()}
+                        onClick={requestDepositConfirm}
                         disabled={
                           demoFundingBlocked ||
                           depositSubmitting ||
@@ -1553,15 +1675,17 @@ function WalletPageContent() {
                     <>
                       <div>
                         <p className="text-xs text-text-tertiary mb-3 font-medium uppercase tracking-wide">Payment Method</p>
-                        {/* Featured selected coin */}
-                        <div className="rounded-xl border border-border-primary bg-bg-secondary p-4 mb-2">
+                        {/* Featured selected coin — highlighted green so the
+                            chosen method is clearly the selected one. */}
+                        <div className="rounded-xl border-2 border-buy bg-buy/[0.08] p-4 mb-2 flex items-center justify-between gap-2">
                           <p className="text-base font-bold text-text-primary font-mono flex items-center gap-2.5">
-                            <span className="text-xl leading-none" aria-hidden>◆</span>
+                            <span className="text-xl leading-none text-buy" aria-hidden>◆</span>
                             <span>
                               {selectedWithdrawCrypto.label}{' '}
                               <span className="text-text-tertiary text-sm font-normal">({selectedWithdrawCrypto.sub})</span>
                             </span>
                           </p>
+                          <span className="shrink-0 text-[11px] font-semibold text-buy uppercase tracking-wide">Selected</span>
                         </div>
                         <div className="grid grid-cols-2 gap-2">
                           {CRYPTO_ASSETS.filter((c) => c.id !== selectedCryptoWithdraw).map((c) => (
@@ -1682,6 +1806,15 @@ function WalletPageContent() {
                             className="w-full pl-7 pr-4 py-3 rounded-xl border border-border-primary bg-bg-secondary text-text-primary placeholder:text-text-tertiary outline-none focus:border-accent/50 font-mono font-bold text-lg"
                           />
                         </div>
+                        {withdrawInr?.local_amount != null && (
+                          <p className="text-[11px] text-text-secondary mt-1.5">
+                            You&apos;ll receive ≈{' '}
+                            <span className="font-bold text-text-primary">
+                              {withdrawInr.local_amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} {withdrawInr.currency}
+                            </span>{' '}
+                            at the current bank rate.
+                          </p>
+                        )}
                       </div>
 
                       <div className="rounded-xl border border-border-primary bg-bg-secondary px-4 py-3 space-y-2">
@@ -1993,23 +2126,70 @@ function WalletPageContent() {
             ) : null}
             <div className="mb-3 space-y-1">
               <label className="text-[10px] font-semibold uppercase tracking-wider text-text-tertiary">
-                Amount ({wallet?.currency || 'USD'})
+                Amount ({transferIsCent ? CENT_SYMBOL : (wallet?.currency || 'USD')})
               </label>
+              {transferIsCent && transferAccount && balanceTransfer.mode === 'to_main' ? (
+                <p className="text-[10px] text-text-tertiary">
+                  Available: {fmtAccountMoney(transferAccount.balance, true)} · credited to main wallet in USD
+                </p>
+              ) : null}
               <div className="relative">
                 <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-xs font-bold text-text-tertiary">
-                  $
+                  {transferIsCent ? CENT_SYMBOL : '$'}
                 </span>
                 <input
                   type="number"
                   min="0.01"
                   step="0.01"
                   value={balanceTransferAmount}
-                  onChange={(e) => setBalanceTransferAmount(e.target.value)}
+                  onChange={(e) => { setBalanceTransferAmount(e.target.value); setTransferAgree(false); }}
                   placeholder="0.00"
                   className="w-full rounded-lg border border-border-primary bg-bg-primary py-2 pl-7 pr-3 text-sm font-mono font-bold text-text-primary outline-none focus:border-accent/40"
                 />
               </div>
             </div>
+
+            {/* Credit-forfeit rule for to-main transfers (client 2026-06-24). */}
+            {balanceTransfer.mode === 'to_main' && transferCreditUsd > 0 ? (
+              <div className={clsx(
+                'mb-3 rounded-lg border px-3 py-2.5 text-[11px] leading-relaxed',
+                transferWouldForfeit ? 'border-red-500/40 bg-red-500/10 text-red-300' : 'border-amber-500/30 bg-amber-500/10 text-amber-200',
+              )}>
+                <p>
+                  This account has <strong>{fmtAccountMoney(transferCreditUsd, transferIsCent)}</strong> bonus credit.
+                  You must keep at least <strong>{fmtAccountMoney(transferCreditUsd, transferIsCent)}</strong> balance in it.
+                </p>
+                {transferWouldForfeit ? (
+                  <p className="mt-1 font-semibold">
+                    ⚠️ This transfer drops your balance below the credit — your entire{' '}
+                    {fmtAccountMoney(transferCreditUsd, transferIsCent)} credit will be forfeited (insurance payouts are kept).
+                  </p>
+                ) : (
+                  <p className="mt-1 text-text-tertiary">Withdraw more than that and the entire credit is forfeited (insurance payouts are kept).</p>
+                )}
+                {transferWouldForfeit ? (
+                  <label className="mt-2 flex items-start gap-2 cursor-pointer text-text-secondary">
+                    <input
+                      type="checkbox"
+                      checked={transferAgree}
+                      onChange={(e) => setTransferAgree(e.target.checked)}
+                      className="mt-0.5 accent-red-500"
+                    />
+                    <span>I understand my {fmtAccountMoney(transferCreditUsd, transferIsCent)} credit will be forfeited.</span>
+                  </label>
+                ) : null}
+              </div>
+            ) : null}
+
+            {/* Empty-account heads-up (client 2026-06-26): warn before a
+                transfer zeroes out the trading account. */}
+            {transferWouldEmpty ? (
+              <div className="mb-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 text-[11px] leading-relaxed text-amber-200">
+                ⚠️ This transfer moves your <strong>entire balance</strong> out — the account will be left at{' '}
+                <strong>{fmtAccountMoney(0, transferIsCent)}</strong>. You can move funds back from your main wallet anytime.
+              </div>
+            ) : null}
+
             <div className="flex gap-2">
               <button
                 type="button"
@@ -2021,10 +2201,10 @@ function WalletPageContent() {
               <button
                 type="button"
                 onClick={() => void submitBalanceTransfer()}
-                disabled={balanceTransferBusy}
+                disabled={balanceTransferBusy || (transferWouldForfeit && !transferAgree)}
                 className={clsx(
                   'flex-1 rounded-lg py-2 text-xs font-bold transition-colors',
-                  balanceTransferBusy
+                  (balanceTransferBusy || (transferWouldForfeit && !transferAgree))
                     ? 'cursor-not-allowed bg-border-primary text-text-tertiary opacity-60'
                     : 'bg-accent text-black hover:bg-accent/90',
                 )}
@@ -2047,6 +2227,46 @@ function WalletPageContent() {
           void fetchData(true);
         }}
       />
+
+      {/* XM-style pre-deposit confirmation (client 2026-06-20). */}
+      {showDepositConfirm && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={() => setShowDepositConfirm(false)} />
+          <div className="relative w-full max-w-md rounded-2xl border border-border-primary bg-bg-base shadow-2xl p-5 sm:p-6 space-y-4 animate-in fade-in zoom-in-95">
+            <div className="flex items-start justify-between gap-3">
+              <h3 className="text-base font-bold text-text-primary">Before your deposit is processed</h3>
+              <button type="button" onClick={() => setShowDepositConfirm(false)} className="text-text-tertiary hover:text-text-primary">✕</button>
+            </div>
+            <p className="text-xs text-text-secondary">Please make sure the points below are met so your deposit is credited successfully:</p>
+            <ul className="space-y-2.5 text-xs text-text-secondary">
+              <li className="flex gap-2"><span className="text-[#55a630] font-bold">•</span><span>Pay the <strong className="text-text-primary">exact amount</strong> requested — a different amount may delay or block crediting.</span></li>
+              <li className="flex gap-2"><span className="text-amber-500 font-bold">•</span><span><strong className="text-amber-500">Enter the correct 12-digit UTR / UPI reference</strong> after paying. If this is missed, the funds will not be credited.</span></li>
+              <li className="flex gap-2"><span className="text-[#55a630] font-bold">•</span><span>UPI deposits may take up to <strong className="text-text-primary">20 minutes</strong> to credit. If it takes longer, contact live support.</span></li>
+            </ul>
+            <div className="rounded-lg bg-bg-secondary border border-border-primary px-3 py-2.5 text-xs text-text-secondary">
+              Depositing <strong className="text-text-primary">${parseFloat(depositAmount || '0').toLocaleString()}</strong> · UTR/Ref:{' '}
+              <span className="font-mono text-text-primary break-all">{depositTxId.trim()}</span>
+            </div>
+            <div className="flex gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setShowDepositConfirm(false)}
+                className="flex-1 py-2.5 rounded-xl border border-border-primary bg-bg-secondary text-sm font-semibold text-text-secondary hover:bg-bg-hover transition-fast"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={depositSubmitting}
+                onClick={() => { setShowDepositConfirm(false); void submitDeposit(); }}
+                className="flex-1 py-2.5 rounded-xl bg-[#55a630] text-sm font-bold text-white hover:bg-[#4a9329] transition-fast disabled:opacity-50"
+              >
+                Confirm &amp; Submit
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
     </DashboardShell>
   );

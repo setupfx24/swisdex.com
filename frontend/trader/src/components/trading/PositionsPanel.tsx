@@ -444,16 +444,18 @@ export default function PositionsPanel({ variant = 'default' }: PositionsPanelPr
           { timeoutMs: 8_000 },
         );
         const pnl = res.profit ?? 0;
-        const sign = pnl >= 0 ? '+' : '';
+        // Cent accounts must show ¢ (×100), not $ (client 2026-06-23: close
+        // toast was converting cent P&L to $).
+        const pnlStr = fmtAccountMoney(pnl, isCentAccount(activeAccount), { signDisplay: 'always' });
         pnl >= 0 ? sounds.profit() : sounds.loss();
 
         if (res.remaining_lots && res.remaining_lots > 0) {
           toast.success(
-            `Partial close @ ${res.close_price}\nBooked: ${sign}$${pnl.toFixed(2)}  •  ${res.remaining_lots} lots remain`,
+            `Partial close @ ${res.close_price}\nBooked: ${pnlStr}  •  ${res.remaining_lots} lots remain`,
             { duration: 5000 },
           );
         } else {
-          toast.success(`Closed @ ${res.close_price} | P&L: ${sign}$${pnl.toFixed(2)}`);
+          toast.success(`Closed @ ${res.close_price} | P&L: ${pnlStr}`);
         }
         Promise.all([refreshPositions(), refreshAccount(), loadHistory()]).catch(() => {});
       } catch (e) {
@@ -518,9 +520,9 @@ export default function PositionsPanel({ variant = 'default' }: PositionsPanelPr
       }
 
       if (res.closed_count > 0) {
-        const sign = res.total_profit >= 0 ? '+' : '';
+        const totalStr = fmtAccountMoney(res.total_profit, isCentAccount(activeAccount), { signDisplay: 'always' });
         toast.success(
-          `${res.closed_count} position${res.closed_count > 1 ? 's' : ''} closed — booked ${sign}$${res.total_profit.toFixed(2)}`,
+          `${res.closed_count} position${res.closed_count > 1 ? 's' : ''} closed — booked ${totalStr}`,
         );
       }
       if (res.failed_count > 0) {
@@ -1100,7 +1102,7 @@ export default function PositionsPanel({ variant = 'default' }: PositionsPanelPr
                               })()}
                             </div>
                             <span className="font-mono text-sm font-bold tabular-nums" style={{ color: pnl >= 0 ? '#2962FF' : '#FF2440' }}>
-                              {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}
+                              {fmtAccountMoney(pnl, isCentAccount(activeAccount), { signDisplay: 'always' })}
                             </span>
                           </div>
                           <div className="grid grid-cols-3 gap-x-3 gap-y-1 text-[11px]">
@@ -1110,11 +1112,14 @@ export default function PositionsPanel({ variant = 'default' }: PositionsPanelPr
                             <div><span className="text-text-tertiary">Acct</span> <span className="text-text-secondary">{accountLabel(pos.account_id)}</span></div>
                             {(() => {
                               const charges = (pos.commission || 0) + (pos.swap || 0);
+                              // Charges (commission + swap) are a COST that reduces
+                              // P&L, so a positive total must show as a deduction
+                              // (-$x, red) — not a gain (+$x). Client 2026-06-23.
                               return (
                                 <div>
                                   <span className="text-text-tertiary">Charges</span>{' '}
-                                  <span className={clsx('font-mono', charges < 0 ? 'text-sell' : 'text-text-secondary')}>
-                                    {charges === 0 ? '$0.00' : (charges > 0 ? '+' : '-') + '$' + Math.abs(charges).toFixed(2)}
+                                  <span className={clsx('font-mono', charges > 0 ? 'text-sell' : charges < 0 ? 'text-buy' : 'text-text-secondary')}>
+                                    {charges === 0 ? '$0.00' : (charges > 0 ? '-' : '+') + '$' + Math.abs(charges).toFixed(2)}
                                   </span>
                                 </div>
                               );
@@ -1232,8 +1237,8 @@ export default function PositionsPanel({ variant = 'default' }: PositionsPanelPr
                             <td className={clsx(td, 'font-mono font-bold tabular-nums')} style={{ color: pnl >= 0 ? '#2962FF' : '#FF2440' }}>
                               {pnl >= 0 ? '+' : ''}{fmtAccountMoney(pnl, isCentAccount(activeAccount))}
                             </td>
-                            <td className={clsx(td, 'font-mono tabular-nums', charges < 0 ? 'text-sell' : 'text-text-secondary')}>
-                              {charges === 0 ? fmtAccountMoney(0, isCentAccount(activeAccount)) : (charges > 0 ? '+' : '-') + fmtAccountMoney(Math.abs(charges), isCentAccount(activeAccount)).replace('-', '')}
+                            <td className={clsx(td, 'font-mono tabular-nums', charges > 0 ? 'text-sell' : charges < 0 ? 'text-buy' : 'text-text-secondary')}>
+                              {charges === 0 ? fmtAccountMoney(0, isCentAccount(activeAccount)) : (charges > 0 ? '-' : '+') + fmtAccountMoney(Math.abs(charges), isCentAccount(activeAccount)).replace('-', '')}
                             </td>
                             <td className={clsx(td, 'text-[10px]')}>
                               {sltpEdit && sltpEdit.positionId === pos.id ? (
@@ -1490,9 +1495,12 @@ export default function PositionsPanel({ variant = 'default' }: PositionsPanelPr
                     ) : (
                       historyTrades.map((trade) => {
                         const d = getDigits(trade.symbol);
-                        const pnl = trade.pnl || 0;
-                        const charges = trade.commission || 0;
-                        const net = pnl - charges;
+                        // trade.pnl from /portfolio/trades is ALREADY net (price
+                        // P&L − commission − swap). Use it directly — subtracting
+                        // charges again double-counted commission and showed
+                        // -$0.74 vs the -$0.67 on the close popup + trade history
+                        // (client 2026-06-24).
+                        const net = trade.pnl || 0;
                         const exitBadge = closeReasonBadge(trade.close_reason, trade.close_price, d);
                         return (
                           <div key={trade.id} className="rounded-xl border border-border-glass bg-bg-secondary/40 p-3 space-y-2">
@@ -1511,7 +1519,7 @@ export default function PositionsPanel({ variant = 'default' }: PositionsPanelPr
                                 })()}
                               </div>
                               <span className="font-mono text-sm font-bold tabular-nums" style={{ color: net >= 0 ? '#2962FF' : '#FF2440' }}>
-                                {net >= 0 ? '+' : ''}${net.toFixed(2)}
+                                {fmtAccountMoney(net, isCentAccount(activeAccount), { signDisplay: 'always' })}
                               </span>
                             </div>
                             <div className="grid grid-cols-3 gap-x-3 gap-y-1 text-[11px]">
@@ -1556,9 +1564,12 @@ export default function PositionsPanel({ variant = 'default' }: PositionsPanelPr
                     <tbody>
                       {historyTrades.map((trade) => {
                         const d = getDigits(trade.symbol);
-                        const pnl = trade.pnl || 0;
-                        const charges = trade.commission || 0;
-                        const net = pnl - charges;
+                        // trade.pnl from /portfolio/trades is ALREADY net (price
+                        // P&L − commission − swap). Use it directly — subtracting
+                        // charges again double-counted commission and showed
+                        // -$0.74 vs the -$0.67 on the close popup + trade history
+                        // (client 2026-06-24).
+                        const net = trade.pnl || 0;
                         const exitBadge = closeReasonBadge(trade.close_reason, trade.close_price, d);
                         return (
                           <tr key={trade.id} className={tbodyRowClass}>
@@ -1587,7 +1598,7 @@ export default function PositionsPanel({ variant = 'default' }: PositionsPanelPr
                             <td className={clsx(td, 'font-mono')}>{trade.open_price.toFixed(d)}</td>
                             <td className={clsx(td, 'font-mono')}>{trade.close_price.toFixed(d)}</td>
                             <td className={clsx(td, 'font-mono font-bold tabular-nums')} style={{ color: net >= 0 ? '#2962FF' : '#FF2440' }}>
-                              {net >= 0 ? '+' : ''}${net.toFixed(2)}
+                              {fmtAccountMoney(net, isCentAccount(activeAccount), { signDisplay: 'always' })}
                             </td>
                             <td className={td}>
                               <span

@@ -18,17 +18,28 @@ router = APIRouter(prefix="/employees", tags=["Employees"])
 # Static catalog of permissions the admin UI renders as checkboxes. Keep in sync
 # with require_permission() call sites across the admin backend.
 PERMISSION_CATALOG = {
-    "Users":       ["users.view", "users.add_fund", "users.deduct_fund", "users.ban", "users.block_trading", "users.kill_switch", "users.set_password"],
+    # Client 2026-06-20: the catalog was missing several permissions the
+    # backend actually checks (users.delete, funds.approve, config.*,
+    # analytics.finance, settings.*, insurance.manage, trades.manage,
+    # users.impersonate), so an admin could not grant the matching access and
+    # the relevant sidebar pages (Approvals, Config, Finance Overview, …) never
+    # appeared for any custom-role employee. Now every require_permission() key
+    # is grantable here.
+    "Users":       ["users.view", "users.add_fund", "users.deduct_fund", "users.ban", "users.block_trading", "users.kill_switch", "users.set_password", "users.delete", "users.impersonate"],
     "KYC":         ["kyc.view", "kyc.manage"],
     "Deposits":    ["deposits.view", "deposits.approve", "deposits.reject"],
     "Withdrawals": ["withdrawals.view", "withdrawals.approve", "withdrawals.reject"],
-    "Trading":     ["trades.view", "trades.modify", "trades.close", "trades.create", "positions.view", "orders.view"],
+    "Approvals":   ["funds.approve"],
+    "Trading":     ["trades.view", "trades.modify", "trades.close", "trades.create", "trades.manage", "positions.view", "orders.view"],
     "Social":      ["social.view", "social.manage"],
     "Banks":       ["banks.view", "banks.create", "banks.update"],
     "IB":          ["ib.view", "ib.manage"],
+    "Insurance":   ["insurance.manage"],
     "Marketing":   ["banners.view", "banners.create", "banners.update", "banners.delete", "bonus.view", "bonus.create", "bonus.update"],
     "Support":     ["tickets.view", "tickets.reply", "tickets.assign"],
-    "Analytics":   ["analytics.view", "exposure.view"],
+    "Analytics":   ["analytics.view", "analytics.finance", "exposure.view"],
+    "Config":      ["config.view", "config.update"],
+    "Settings":    ["settings.update", "settings.manage"],
     "Audit":       ["audit_logs.view"],
     "RM":          ["rm.view", "rm.request", "rm.manage", "rm.assign"],
     "Fixed Return": ["fixed_return.view", "fixed_return.manage"],

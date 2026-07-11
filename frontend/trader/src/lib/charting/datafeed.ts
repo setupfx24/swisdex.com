@@ -43,47 +43,11 @@ const BINANCE_PAIRS: Record<string, string> = {
   LINKUSD: 'LINKUSDT', DOTUSD: 'DOTUSDT', AVAXUSD: 'AVAXUSDT',
 };
 
-const RESOLUTION_TO_BINANCE: Record<string, string> = {
-  '1': '1m', '5': '5m', '15': '15m', '30': '30m',
-  '60': '1h', '240': '4h', D: '1d', '1D': '1d',
-};
+// Binance history fetch was removed (client 2026-06-26): InfoWay feeds crypto
+// too, so the engine /bars endpoint is the single candle source for every
+// symbol. BINANCE_PAIRS above is kept only to classify a symbol as crypto.
 
-const _binanceCache = new Map<string, { bars: Bar[]; ts: number }>();
-
-async function fetchBinanceKlines(
-  symbol: string, resolution: string, from: number, to: number,
-): Promise<Bar[]> {
-  const pair = BINANCE_PAIRS[symbol.toUpperCase()];
-  if (!pair) return [];
-
-  const interval = RESOLUTION_TO_BINANCE[resolution] || '5m';
-  const cacheKey = `${pair}:${interval}`;
-
-  const cached = _binanceCache.get(cacheKey);
-  if (cached && Date.now() - cached.ts < 60_000) {
-    return cached.bars.filter((b) => b.time >= from * 1000 && b.time <= to * 1000);
-  }
-
-  try {
-    const params = new URLSearchParams({
-      symbol: pair, interval,
-      startTime: String(from * 1000), endTime: String(to * 1000), limit: '1000',
-    });
-    const resp = await fetch(`https://api.binance.com/api/v3/klines?${params}`);
-    if (!resp.ok) return [];
-    const data = await resp.json();
-    const bars: Bar[] = (data as number[][]).map((k) => ({
-      time: Number(k[0]), open: Number(k[1]), high: Number(k[2]),
-      low: Number(k[3]), close: Number(k[4]), volume: Number(k[5]),
-    }));
-    _binanceCache.set(cacheKey, { bars, ts: Date.now() });
-    return bars;
-  } catch {
-    return [];
-  }
-}
-
-/* ─── Synthetic historical candles (non-crypto) ─── */
+/* ─── Synthetic historical candles (fallback) ─── */
 
 function seededRand(seed: number) {
   let s = Math.abs(seed) % 2147483647;
@@ -213,10 +177,71 @@ interface Subscription {
   symbol: string;
   resolution: string;
   onTick: SubscribeBarsCallback;
+  /** TradingView's "your data changed, drop cache + re-fetch" callback. Called
+   *  on a socket RECONNECT so bars missed during the drop are re-pulled. */
+  resetCache?: () => void;
   unsubscribe: () => void;
 }
 
 const subscriptions = new Map<string, Subscription>();
+
+// Register ONCE: when the bar socket re-connects after a drop, reset every live
+// subscription's cache so TradingView re-calls getBars and fills any gap left by
+// the missed realtime bars (client 2026-07-03).
+let _reconnectHooked = false;
+function ensureReconnectHook() {
+  if (_reconnectHooked) return;
+  _reconnectHooked = true;
+  barSocket.onReconnect(() => {
+    for (const sub of subscriptions.values()) {
+      try { sub.resetCache?.(); } catch { /* ignore */ }
+    }
+  });
+}
+
+/* ─── Bid-based chart shift ─── */
+//
+// The engine's BarAggregator builds candles from the raw tick MID
+// (market-data/src/bar_aggregator.py: mid = (bid+ask)/2), but every other
+// price the trader sees — the order panel's BID/ASK and the positions
+// panel's "current" price (bid for buys) — is the spread-widened quote.
+// With a wide admin spread (e.g. BTCUSD 1700 points) the chart floated
+// half a spread above the bid, so chart / BID / P&L all looked different.
+//
+// Fix (client 2026-07-04): draw the chart at the BID, the MT4/MT5
+// convention — shift every bar down by half the live spread taken from
+// the same store tick the panels render. Chart last price == panel BID ==
+// buy-position current price by construction. Historical bars are shifted
+// by the CURRENT half-spread (fixed-markup assumption), which keeps the
+// candle series continuous with the live bar.
+
+function halfSpreadOf(tick?: { bid: number; ask: number } | null): number {
+  // Client 2026-07-10 (true MT5): draw the candle at the BID. The candle's own
+  // last-price line IS the LTP (bid), matching the panel BID and a buy
+  // position's "current" price by construction. A single blue ASK line is
+  // drawn half a spread above it (ChartingLibraryChart) as the spread line.
+  // Shift = half the LIVE spread from the same store tick the panels render,
+  // so the candle close == bid exactly and never drifts from the ask line.
+  if (!tick || !(tick.bid > 0) || !(tick.ask > 0)) return 0;
+  return (tick.ask - tick.bid) / 2;
+}
+
+function symbolDigits(sym: string): number {
+  const inst = useTradingStore.getState().instruments.find(
+    (i) => i.symbol.toUpperCase() === sym,
+  );
+  return inst?.digits ?? 5;
+}
+
+function toBidBar(bar: Bar, halfSpread: number, digits: number): Bar {
+  if (halfSpread <= 0) return bar;
+  const shift = (v: number) => Number((v - halfSpread).toFixed(digits));
+  return {
+    ...bar,
+    open: shift(bar.open), high: shift(bar.high),
+    low: shift(bar.low), close: shift(bar.close),
+  };
+}
 
 /* ─── Helpers ─── */
 
@@ -287,20 +312,10 @@ export const swisDexDatafeed: IBasicDataFeed = {
       const sym = (symbolInfo.ticker || symbolInfo.name).toUpperCase();
       const { from, to } = periodParams;
 
-      // 1. Crypto → Binance (real OHLCV, fastest path).
-      if (BINANCE_PAIRS[sym]) {
-        const bars = await fetchBinanceKlines(sym, String(resolution), from, to);
-        if (bars.length > 0) {
-          onResult(bars, { noData: false });
-          return;
-        }
-      }
-
-      // 2. Non-crypto → REAL aggregated bars from our backend
-      //    (TimescaleDB hypertable populated by market-data's BarAggregator
-      //    from live AllTick ticks). Bars across timeframes agree by
-      //    construction (5m == aggregation of five 1m, 1h == twelve 5m,
-      //    etc.) so switching TF no longer shuffles the historical pattern.
+      // 1. ENGINE bars FIRST for EVERY symbol — the InfoWay candles aggregated
+      //    by market-data's BarAggregator (gateway /instruments/{sym}/bars).
+      //    This is the same feed the running P&L is priced off, so the chart
+      //    matches the P&L for crypto AND non-crypto (client 2026-06-26).
       try {
         const params = new URLSearchParams({
           resolution: String(resolution), from: String(from), to: String(to),
@@ -310,25 +325,36 @@ export const swisDexDatafeed: IBasicDataFeed = {
           const data = await res.json();
           const rawBars = Array.isArray(data?.bars) ? data.bars : [];
           if (rawBars.length > 0) {
-            const bars: Bar[] = rawBars.map((b: any) => ({
+            // Engine bars are MID-based — shift to BID so the chart matches
+            // the panel bid / P&L current price (see "Bid-based chart shift").
+            // waitForPrice resolves instantly when a tick is already in the
+            // store; the timeout only bites on a dead feed, where hs=0 keeps
+            // the (mid) bars rather than blocking the chart.
+            const liveTick = await waitForPrice(sym, 2500);
+            const hs = halfSpreadOf(liveTick);
+            const digits = symbolDigits(sym);
+            const bars: Bar[] = rawBars.map((b: any) => toBidBar({
               time: b.time * 1000, open: b.open, high: b.high,
               low: b.low, close: b.close, volume: b.volume,
-            }));
+            }, hs, digits));
             onResult(bars, { noData: false });
             return;
           }
         }
-      } catch { /* backend unavailable — fall through to synthetic */ }
+      } catch { /* backend unavailable — fall through */ }
 
-      // 3. Last resort — synthetic walk anchored to the current live mid.
+      // 2. Last resort — synthetic walk anchored to the current live mid.
+      //    (Binance was removed: InfoWay feeds crypto too, so the engine /bars
+      //    above is the single source for every symbol — client 2026-06-26.)
       //    Used only if both backend and Binance failed (fresh deploy with
       //    no aggregated bars in TimescaleDB yet). Synthetic bars do NOT
       //    aggregate across TFs, so this is intentionally the final fallback.
       const tick = await waitForPrice(sym);
       if (tick && tick.bid > 0) {
-        const mid = (tick.bid + tick.ask) / 2;
+        // Anchor the synthetic walk at the BID, not the mid, for the same
+        // chart==bid alignment as the engine-bar path above.
         const spread = Math.abs(tick.ask - tick.bid);
-        const bars = generateSyntheticBars(sym, mid, spread, String(resolution), from, to);
+        const bars = generateSyntheticBars(sym, tick.bid, spread, String(resolution), from, to);
         if (bars.length > 0) {
           onResult(bars, { noData: false });
           return;
@@ -344,30 +370,47 @@ export const swisDexDatafeed: IBasicDataFeed = {
   subscribeBars: (
     symbolInfo: LibrarySymbolInfo, resolution: ResolutionString,
     onTick: SubscribeBarsCallback, listenerGuid: string,
+    onResetCacheNeededCallback?: () => void,
   ) => {
     const sym = (symbolInfo.ticker || symbolInfo.name).toUpperCase();
     const res = String(resolution);
+    ensureReconnectHook();
 
-    // Subscribe to the gateway's bar-update channel. The server pushes a
-    // pre-aggregated OHLC snapshot on every tick (the same data the
-    // BarAggregator wrote to bar:current:<SYM>:<TF> in Redis), so the
-    // current candle on the chart matches the candle on TradingView /
-    // OANDA / Binance / etc. by construction.
+    // Subscribe to the gateway's bar-update channel — the SOLE source for the
+    // live candle. market-data publishes bar:current:<SYM>:<TF> to /ws/bars on
+    // EVERY tick (plus a 1s heartbeat), so this alone keeps the candle live and
+    // it always equals the server aggregation (hence the running P&L too).
+    //
+    // The old fixed-150ms "nudge" that ALSO pushed the /ws/prices store mid into
+    // the candle close was REMOVED (2026-07-10). With the real InfoWay feed the
+    // last-trade price bounces tick-to-tick, and /ws/bars (bar close) and
+    // /ws/prices (store mid) arrive on SEPARATE sockets — at any instant they
+    // hold DIFFERENT recent ticks. Driving the candle from BOTH made its close
+    // flip between the two values ~10×/s: the visible "candle blinking". One
+    // source ⇒ the candle moves once per real tick, no flicker.
     const unsub = barSocket.subscribe(sym, res, (bar: ServerBar) => {
       const sub = subscriptions.get(listenerGuid);
       if (!sub) return;
-      // Server emits seconds — TradingView expects milliseconds.
-      sub.onTick({
+      // Shift the mid bar to BID using the live spread (0 until admin sets one).
+      // Server emits seconds — TV wants ms.
+      const hs = halfSpreadOf(useTradingStore.getState().prices[sym]);
+      const digits = symbolDigits(sym);
+      const b = toBidBar({
         time: bar.time * 1000,
         open: bar.open,
         high: bar.high,
         low: bar.low,
         close: bar.close,
         volume: bar.volume,
-      });
+      }, hs, digits);
+      sub.onTick(b);
     });
 
-    subscriptions.set(listenerGuid, { symbol: sym, resolution: res, onTick, unsubscribe: unsub });
+    subscriptions.set(listenerGuid, {
+      symbol: sym, resolution: res, onTick,
+      resetCache: onResetCacheNeededCallback,
+      unsubscribe: () => { unsub(); },
+    });
   },
 
   unsubscribeBars: (listenerGuid: string) => {

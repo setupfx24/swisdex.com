@@ -9,6 +9,7 @@ import hashlib
 import hmac
 import json
 import logging
+import time
 from decimal import Decimal
 from typing import Optional
 
@@ -247,6 +248,33 @@ async def get_payment_status(payment_id: str) -> dict:
     return data
 
 
+async def list_invoice_payments(invoice_id: str) -> list[dict]:
+    """List the payment attempts made against a NOWPayments invoice.
+
+    Used by the reconciliation poller to settle deposits whose IPN webhook
+    never arrived (Cloudflare/dashboard issues). Returns the raw `data` list
+    (each entry has `payment_id`, `payment_status`, `order_id`, …) or [] on any
+    error — the caller treats an empty list as 'nothing to settle yet', so a
+    wrong endpoint can never mis-credit, it just won't reconcile."""
+    settings = get_settings()
+    if not settings.NOWPAYMENTS_API_KEY or not invoice_id:
+        return []
+    headers = {"x-api-key": settings.NOWPAYMENTS_API_KEY}
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(
+                f"{_api_base()}/payment/",
+                params={"invoiceId": str(invoice_id), "limit": 20, "page": 0},
+                headers=headers,
+            )
+            if resp.status_code >= 400:
+                return []
+            data = resp.json()
+    except Exception:
+        return []
+    return data.get("data") or [] if isinstance(data, dict) else []
+
+
 def verify_webhook_signature(raw_body: bytes, received_hmac: str) -> bool:
     """Verify the IPN HMAC-SHA512 signature.
 
@@ -273,3 +301,116 @@ def verify_webhook_signature(raw_body: bytes, received_hmac: str) -> bool:
         return False
     computed = hmac.new(secret.encode(), canonical.encode(), hashlib.sha512).hexdigest()
     return hmac.compare_digest(computed, received_hmac)
+
+
+# ─── Automatic withdrawals (payouts) — /v1/payout ────────────────────
+#
+# Unlike deposits (x-api-key only), the payout API needs a short-lived JWT
+# from the account login (/v1/auth). Disable whitelisting + 2FA on the
+# NOWPayments dashboard so payouts run unattended. The merchant must hold
+# crypto balance in NOWPayments custody to fund payouts.
+
+# Cache the JWT in-process; NOWPayments tokens are short-lived (~5 min).
+_jwt_cache: dict = {"token": None, "exp_mono": 0.0}
+
+
+def payouts_configured() -> bool:
+    """True only when the payout credentials are present, so callers can fall
+    back to the manual flow instead of erroring when auto-payout isn't set up."""
+    s = get_settings()
+    return bool(s.NOWPAYMENTS_API_KEY and s.NOWPAYMENTS_EMAIL and s.NOWPAYMENTS_PASSWORD)
+
+
+async def _get_payout_jwt() -> str:
+    """Log in to NOWPayments and return a bearer token, cached ~4 minutes."""
+    now = time.monotonic()
+    if _jwt_cache["token"] and now < _jwt_cache["exp_mono"]:
+        return _jwt_cache["token"]
+    settings = get_settings()
+    if not (settings.NOWPAYMENTS_EMAIL and settings.NOWPAYMENTS_PASSWORD):
+        raise ValueError("NOWPayments payout credentials (email/password) not configured")
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            f"{_api_base()}/auth",
+            json={"email": settings.NOWPAYMENTS_EMAIL, "password": settings.NOWPAYMENTS_PASSWORD},
+        )
+        try:
+            data = resp.json()
+        except Exception:
+            data = {"raw": resp.text}
+        if resp.status_code >= 400 or not data.get("token"):
+            logger.error("NOWPayments auth failed status=%s body=%s", resp.status_code, data)
+            raise ValueError(f"NOWPayments auth error {resp.status_code}: {data}")
+    token = str(data["token"])
+    _jwt_cache["token"] = token
+    _jwt_cache["exp_mono"] = now + 240.0  # refresh well before the ~5-min expiry
+    return token
+
+
+async def estimate_crypto_amount(amount_usd: Decimal, np_currency: str) -> Decimal:
+    """Convert a USD amount to the crypto payout amount via /v1/estimate.
+    Near 1:1 for USDT/USDC; real market rate for BTC/ETH/etc."""
+    settings = get_settings()
+    headers = {"x-api-key": settings.NOWPAYMENTS_API_KEY}
+    params = {"amount": float(amount_usd), "currency_from": "usd", "currency_to": np_currency}
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(f"{_api_base()}/estimate", headers=headers, params=params)
+        try:
+            data = resp.json()
+        except Exception:
+            data = {"raw": resp.text}
+        if resp.status_code >= 400 or data.get("estimated_amount") is None:
+            raise ValueError(f"NOWPayments estimate failed {resp.status_code}: {data}")
+    return Decimal(str(data["estimated_amount"]))
+
+
+async def create_payout(
+    *, address: str, np_currency: str, crypto_amount: Decimal, order_id: str,
+) -> dict:
+    """Send a single crypto payout via /v1/payout.
+
+    Returns {"batch_id": str, "payout_id": str|None, "raw": dict}. Raises
+    ValueError on auth/API errors so the caller can refund the wallet.
+    With 2FA disabled on the dashboard, no verify step is required.
+    """
+    settings = get_settings()
+    if not settings.NOWPAYMENTS_API_KEY:
+        raise ValueError("NOWPayments API key not configured")
+    callback_base = (settings.NOWPAYMENTS_CALLBACK_BASE_URL or "").rstrip("/")
+    ipn_url = f"{callback_base}/api/v1/webhooks/nowpayments-payout" if callback_base else None
+
+    token = await _get_payout_jwt()
+    headers = {
+        "x-api-key": settings.NOWPAYMENTS_API_KEY,
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    withdrawal: dict = {
+        "address": address,
+        "currency": np_currency,
+        "amount": float(crypto_amount),
+    }
+    if ipn_url:
+        withdrawal["ipn_callback_url"] = ipn_url
+    payload: dict = {"withdrawals": [withdrawal]}
+    if ipn_url:
+        payload["ipn_callback_url"] = ipn_url
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(f"{_api_base()}/payout", headers=headers, json=payload)
+        try:
+            data = resp.json()
+        except Exception:
+            data = {"raw": resp.text}
+        if resp.status_code >= 400:
+            logger.error("NOWPayments payout failed status=%s body=%s order=%s",
+                         resp.status_code, data, order_id)
+            raise ValueError(f"NOWPayments payout error {resp.status_code}: {data}")
+        logger.info("NOWPayments payout created: order=%s batch=%s", order_id, data.get("id"))
+
+    batch_id = data.get("id") or data.get("batch_id")
+    payouts = data.get("withdrawals") or []
+    payout_id = (payouts[0].get("id") if payouts and isinstance(payouts[0], dict) else None)
+    if not batch_id:
+        raise ValueError(f"NOWPayments payout returned no batch id: {data}")
+    return {"batch_id": str(batch_id), "payout_id": str(payout_id) if payout_id else None, "raw": data}

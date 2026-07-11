@@ -214,6 +214,14 @@ class SLTPEngine:
             )
             account.balance += profit
             account.margin_used = max(Decimal("0"), (account.margin_used or Decimal("0")) - margin_release)
+            # Negative Balance Protection — broker absorbs any residual loss; a
+            # trader can never go below zero (client 2026-06-19).
+            if account.balance < Decimal("0"):
+                logger.warning(
+                    "NBP: absorbing %.2f negative balance on account %s after %s",
+                    float(-account.balance), account.account_number, reason.upper(),
+                )
+                account.balance = Decimal("0")
             account.equity = account.balance + (account.credit or Decimal("0"))
             account.free_margin = account.equity - account.margin_used
 

@@ -11,7 +11,7 @@ import {
   UserCog, ChevronDown, ChevronRight, Network, Share2,
   DollarSign, Percent, ArrowLeftRight, PanelLeftClose, PanelLeft,
   Receipt, Layers, ShieldCheck, ScrollText, BookOpen, Sparkles, Package, Megaphone,
-  UserCheck, HandCoins, ClipboardList, KeyRound,
+  UserCheck, HandCoins, ClipboardList, KeyRound, Gauge,
 } from 'lucide-react';
 
 interface NavItem {
@@ -26,6 +26,7 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
   { label: 'Finance Overview', href: '/finance-overview', icon: BarChart3, perm: 'analytics.finance' },
+  { label: 'SwisDex Expenses', href: '/swisdex-expenses', icon: Receipt, perm: 'analytics.finance' },
   { label: 'Users', href: '/users', icon: Users, perm: 'users.view' },
   {
     label: 'Identity verification',
@@ -34,11 +35,14 @@ const NAV_ITEMS: NavItem[] = [
     perm: 'kyc.view',
   },
   { label: 'Trades', href: '/trades', icon: CandlestickChart, perm: 'trades.view' },
+  { label: 'Risk Management', href: '/risk', icon: Gauge, perm: 'trades.view' },
   { label: 'Book Management', href: '/book', icon: BookOpen, perm: 'trades.view' },
   { label: 'Deposits', href: '/deposits', icon: Wallet, perm: 'deposits.view' },
+  { label: 'Deposit Requests', href: '/deposit-requests', icon: Wallet, perm: 'deposits.view' },
   { label: 'Approvals', href: '/approvals', icon: ShieldCheck, perm: 'funds.approve' },
   { label: 'Transactions', href: '/transactions', icon: Receipt, perm: 'deposits.view' },
   { label: 'Banks', href: '/banks', icon: Landmark, perm: 'banks.view' },
+  { label: 'Payment Methods', href: '/payment-methods', icon: Landmark, perm: 'deposits.view' },
   { label: 'Account types', href: '/account-types', icon: Layers, perm: 'config.view' },
   {
     label: 'Config', icon: Sliders, perm: 'config.view',
@@ -47,7 +51,7 @@ const NAV_ITEMS: NavItem[] = [
       { label: 'Charges', href: '/config/charges' },
       { label: 'Spreads', href: '/config/spreads' },
       { label: 'Swaps', href: '/config/swaps' },
-      { label: 'Fixed Return', href: '/config/fixed-return' },
+      { label: 'AI Powered Staking', href: '/config/fixed-return' },
       { label: 'PAMM', href: '/config/pamm' },
       { label: 'IB Tiers', href: '/config/ib-tiers' },
       { label: 'Referral Tiers', href: '/config/referral-tiers' },
@@ -68,13 +72,14 @@ const NAV_ITEMS: NavItem[] = [
   },
   { label: 'My Clients (RM)', href: '/rm-portal', icon: HandCoins, perm: 'rm.view' },
   { label: 'RM Requests', href: '/rm-requests', icon: UserCheck, perm: 'rm.manage' },
+  { label: 'RM Manual Requests', href: '/rm-manual-requests', icon: ClipboardList, perm: 'rm.manage' },
   { label: 'Analytics', href: '/analytics', icon: BarChart3, perm: 'analytics.view' },
   { label: 'Audit logs', href: '/audit-logs', icon: ScrollText, perm: 'audit_logs.view' },
   { label: 'Bonus', href: '/bonus', icon: Gift, perm: 'bonus.view' },
   // Top-level entry so a Fixed-Return manager role (fixed_return.view) can
   // reach the page without needing config.view (it also lives under Config
   // for super-admins). Same page either way.
-  { label: 'Fixed Return', href: '/config/fixed-return', icon: Wallet, perm: 'fixed_return.view' },
+  { label: 'AI Powered Staking', href: '/config/fixed-return', icon: Wallet, perm: 'fixed_return.view' },
   { label: 'Trade Insurance', href: '/insurance', icon: ShieldCheck, perm: '*' },
   // Play Zone + Lifestyle Fulfillment (gamification/rewards) are not used on
   // this platform — hidden from the sidebar. The pages + APIs still exist, so
@@ -137,7 +142,10 @@ export default function AdminSidebar() {
           <img src="/images/feb.png" alt="SwisDex" className="w-7 h-7 object-contain mx-auto" />
         ) : (
           <Link href="/" className="flex items-center min-w-0">
-            <img src="/images/swisdex_png5.png" alt="SwisDex" className="h-8 w-auto object-contain shrink-0" />
+            {/* Two logo variants, swapped by theme (same as the trader app):
+                white wordmark on dark, dark/colour wordmark on light. */}
+            <img src="/images/swisdex_png5.png" alt="SwisDex" className="swisdex-logo-dark h-8 w-auto object-contain shrink-0" />
+            <img src="/images/swisdex_png.png" alt="SwisDex" className="swisdex-logo-light h-8 w-auto object-contain shrink-0" />
           </Link>
         )}
         <button

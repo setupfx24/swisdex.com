@@ -19,6 +19,7 @@ from decimal import Decimal
 from typing import Optional
 from uuid import UUID
 
+from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -108,6 +109,29 @@ async def maybe_pay_referral_on_first_deposit(
     return None
 
 
+async def _is_funded(db: AsyncSession, user_id: UUID) -> bool:
+    """A referred user counts as funded if they have >= 1 approved deposit OR an
+    admin manual credit (Transaction type 'adjustment', positive). Client
+    2026-06-30: admin credits count alongside real deposits for referral
+    qualification (same rule as the IB pool)."""
+    dep = (await db.execute(
+        select(func.count()).select_from(Deposit).where(
+            Deposit.user_id == user_id,
+            Deposit.status.in_(["approved", "auto_approved"]),
+        )
+    )).scalar() or 0
+    if dep > 0:
+        return True
+    cred = (await db.execute(
+        select(func.count()).select_from(Transaction).where(
+            Transaction.user_id == user_id,
+            Transaction.type == "adjustment",
+            Transaction.amount > 0,
+        )
+    )).scalar() or 0
+    return cred > 0
+
+
 async def maybe_pay_referral_after_trades(
     db: AsyncSession, user_id: UUID
 ) -> Optional[dict]:
@@ -148,15 +172,8 @@ async def maybe_pay_referral_after_trades(
     # "Funds their account" = at least one approved / auto_approved
     # deposit. Demo top-ups don't count — they have no Deposit row.
     funded_required = await get_bool_setting("referral_requires_funded", True)
-    if funded_required:
-        funded_count = (await db.execute(
-            select(func.count()).select_from(Deposit).where(
-                Deposit.user_id == user_id,
-                Deposit.status.in_(["approved", "auto_approved"]),
-            )
-        )).scalar() or 0
-        if funded_count <= 0:
-            return None
+    if funded_required and not await _is_funded(db, user_id):
+        return None
 
     # ── Qualification gate: minimum N closed trades ───────────────────
     # Defaults to 3 to match the trader-page promise. Admin can adjust
@@ -264,7 +281,26 @@ async def claim_referral_bounty(
     if referred.referred_by_user_id != referrer_id:
         return None, "not_found"
     if referred.referral_qualified_at is None:
-        return None, "not_eligible"
+        # Self-heal: a qualifying trade may have run maybe_pay_referral_after_
+        # trades BEFORE the user crossed the (now satisfied) gates — e.g. they
+        # were funded via an admin credit that the old rule ignored, so
+        # referral_qualified_at was never stamped. Re-check the live gates and
+        # stamp now so the claim isn't permanently stuck (client 2026-06-30).
+        kyc_required = await get_bool_setting("referral_requires_kyc", True)
+        funded_required = await get_bool_setting("referral_requires_funded", True)
+        required_trades = await get_int_setting("referral_qualifying_trades", 3)
+        kyc_ok = (not kyc_required) or (referred.kyc_status or "pending").lower() == "approved"
+        funded_ok = (not funded_required) or await _is_funded(db, referred_user_id)
+        trades_n = (await db.execute(
+            select(func.count()).select_from(TradeHistory)
+            .join(TradingAccount, TradingAccount.id == TradeHistory.account_id)
+            .where(TradingAccount.user_id == referred_user_id)
+        )).scalar() or 0
+        trades_ok = int(trades_n) >= int(required_trades)
+        if kyc_ok and funded_ok and trades_ok:
+            referred.referral_qualified_at = datetime.now(timezone.utc)
+        else:
+            return None, "not_eligible"
     if referred.referral_claimed_at is not None:
         return None, "already_claimed"
 
@@ -282,6 +318,19 @@ async def claim_referral_bounty(
         Decimal(str(referrer.referral_commission_balance or 0)) + amount
     )
     referred.referral_claimed_at = datetime.now(timezone.utc)
+    # Record a ledger row so the bounty (a) counts toward total_earned and
+    # (b) shows up in the /referral commission breakdown, attributed to the
+    # referred user by name (client 2026-06-30).
+    referred_display = " ".join(
+        filter(None, [referred.first_name, referred.last_name])
+    ).strip() or (referred.email or "a referral")
+    db.add(Transaction(
+        user_id=referrer_id,
+        type="referral_commission",
+        amount=amount,
+        balance_after=None,
+        description=f"Referral bounty from {referred_display}",
+    ))
     return amount, None
 
 
@@ -361,17 +410,9 @@ async def list_my_referrals(db: AsyncSession, user_id: UUID) -> dict:
 
         kyc_ok = (r.kyc_status or "pending").lower() == "approved"
 
-        # Treat the friend as funded if they have at least one approved
-        # deposit — same gate `maybe_pay_referral_after_trades` uses
-        # before stamping referral_qualified_at.
-        from packages.common.src.models import Deposit
-        funded_count = (await db.execute(
-            select(func.count()).select_from(Deposit).where(
-                Deposit.user_id == r.id,
-                Deposit.status.in_(["approved", "auto_approved"]),
-            )
-        )).scalar() or 0
-        funded_ok = funded_count > 0
+        # Treat the friend as funded if they have an approved deposit OR an
+        # admin credit — same gate `maybe_pay_referral_after_trades` uses.
+        funded_ok = await _is_funded(db, r.id)
 
         trades_ok = int(trade_count) >= int(required_trades)
 
@@ -485,6 +526,28 @@ async def get_my_referral_dashboard(db: AsyncSession, user_id: UUID) -> dict:
         )
     )).scalar() or 0
 
+    # Per-entry commission breakdown so the trader sees WHERE each chunk came
+    # from — direct referral bounty vs AI-Powered-Staking referral — and from
+    # which referred user (carried in the transaction description).
+    ledger_rows = (await db.execute(
+        select(Transaction.amount, Transaction.description, Transaction.created_at)
+        .where(
+            Transaction.user_id == user_id,
+            Transaction.type == "referral_commission",
+        )
+        .order_by(Transaction.created_at.desc())
+        .limit(50)
+    )).all()
+    commission_ledger = [
+        {
+            "amount": float(r.amount or 0),
+            "description": r.description or "Referral commission",
+            "source": "staking" if "staking" in (r.description or "").lower() else "referral",
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        }
+        for r in ledger_rows
+    ]
+
     amount_usd = await get_float_setting("referral_commission_amount_usd", 5.0)
     required_trades = await get_int_setting("referral_qualifying_trades", 3)
     # Per-account-type breakdown — the trader page renders this so the
@@ -516,8 +579,46 @@ async def get_my_referral_dashboard(db: AsyncSession, user_id: UUID) -> dict:
     kyc_required = await get_bool_setting("referral_requires_kyc", True)
     funded_required = await get_bool_setting("referral_requires_funded", True)
 
+    # Extra income = the promotional PREMIUM this user was paid ABOVE the
+    # standard rate via a per-user custom offer (logged in promotional_expenses,
+    # e.g. FR referral extra %). Shown as bonus/extra income on the /referral page.
+    from packages.common.src.models import PromotionalExpense
+    extra_income = float((await db.execute(
+        select(func.coalesce(func.sum(PromotionalExpense.amount), 0))
+        .where(PromotionalExpense.user_id == user_id)
+    )).scalar() or 0)
+    extra_rows = (await db.execute(
+        select(PromotionalExpense.amount, PromotionalExpense.note, PromotionalExpense.created_at)
+        .where(PromotionalExpense.user_id == user_id)
+        .order_by(PromotionalExpense.created_at.desc()).limit(50)
+    )).all()
+    extra_income_ledger = [
+        {
+            "amount": float(r.amount or 0),
+            "note": r.note or "Extra income",
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        }
+        for r in extra_rows
+    ]
+    # The user's EFFECTIVE FR referral % (their custom override if set, else the
+    # global) so the page can show the boosted rate they actually earn.
+    _g_prin = float(await get_float_setting("fr_referral_principal_pct", 0.0))
+    _g_int = float(await get_float_setting("fr_referral_interest_pct", 0.0))
+    _eff_prin = (
+        float(user.fr_referral_principal_pct_override)
+        if user.fr_referral_principal_pct_override is not None else _g_prin
+    )
+    _eff_int = (
+        float(user.fr_referral_interest_pct_override)
+        if user.fr_referral_interest_pct_override is not None else _g_int
+    )
+
     return {
         "referral_code": user.referral_code,
+        "extra_income": round(extra_income, 2),
+        "extra_income_ledger": extra_income_ledger,
+        "fr_referral_principal_pct_effective": _eff_prin,
+        "fr_referral_interest_pct_effective": _eff_int,
         "referrals": int(referrals),
         "qualified_referrals": int(qualified),
         "pending_referrals": int(max(0, int(referrals) - int(qualified))),
@@ -530,7 +631,33 @@ async def get_my_referral_dashboard(db: AsyncSession, user_id: UUID) -> dict:
         # Kept for backward compat with any older client build that
         # still reads `commission_pct`. New clients ignore it.
         "commission_pct": 0.0,
+        # AI-Powered-Staking referral: the referrer's chosen payout mode and the
+        # admin-set percentages, so the /referral page can render the toggle and
+        # what each option pays (client 2026-06-30).
+        "fr_referral_mode": (user.fr_referral_mode or "principal"),
+        "fr_referral_principal_pct": float(await get_float_setting("fr_referral_principal_pct", 0.0)),
+        "fr_referral_interest_pct": float(await get_float_setting("fr_referral_interest_pct", 0.0)),
+        # Per-entry breakdown (direct bounty vs AI-Powered-Staking referral),
+        # each attributed to the referred user by name.
+        "commission_ledger": commission_ledger,
     }
+
+
+async def set_fr_referral_mode(db: AsyncSession, user_id: UUID, mode: str) -> str:
+    """Set the referrer's global AI-Staking referral payout mode (client
+    2026-06-30). 'principal' = a % of each referred user's principal once they
+    lock; 'interest' = a % of each interest payout they receive."""
+    m = (mode or "").strip().lower()
+    if m not in ("principal", "interest"):
+        raise HTTPException(status_code=400, detail="mode must be 'principal' or 'interest'")
+    user = (await db.execute(
+        select(User).where(User.id == user_id).with_for_update()
+    )).scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    user.fr_referral_mode = m
+    await db.commit()
+    return m
 
 
 # ─── IB per-referral bounty (separate from user-level commission) ────

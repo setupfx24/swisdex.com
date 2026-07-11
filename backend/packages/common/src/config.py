@@ -149,15 +149,44 @@ class Settings(BaseSettings):
     # not licensed on the symbol. Heartbeat 10010 every ~30s.
     INFOWAY_TOKEN: str = ""
     INFOWAY_WS_URL: str = "wss://data.infoway.io/ws"
+    # Client 2026-06-20: NEVER show simulated/mock prices. When the real feed
+    # (InfoWay/AllTick) sends nothing — closed market, weekend, token/plan
+    # issue — quotes must FREEZE on the last real price, not switch to the GBM
+    # simulator (which invented e.g. XAUUSD ~2000). Set to true ONLY for local
+    # dev without a feed token.
+    ALLOW_SIMULATED_FEED: bool = False
     # Business segment for the WS URL (?business=common). InfoWay routes
     # forex / crypto / commodities under "common"; equities have separate
     # business codes per their docs. Override only if the account requires it.
     INFOWAY_BUSINESS: str = "common"
     # Subscribe channel: "depth" uses 10003/10005 (best bid + best ask);
     # "trade" uses 10000/10002 (last trade price, mid-only — bid==ask).
-    # Depth is preferred where available; trade is the fallback that's
-    # licensed on every plan.
-    INFOWAY_CHANNEL: str = "depth"
+    # Verified on the free plan (2026-07-08): the DEPTH channel accepts the
+    # subscribe (code 10001/10004 "ok") but pushes ZERO 10005 frames, whereas
+    # the TRADE channel streams 10002 ticks fine → live bid/ask flow again.
+    # Default to "trade" so a fresh deploy stays live; on a paid plan where
+    # depth pushes, set INFOWAY_CHANNEL=depth in .env for true bid/ask.
+    INFOWAY_CHANNEL: str = "trade"
+    # Seconds between reconcile REST calls (closed-bar re-assert vs official OHLC).
+    # 3s suits the free plan's 60/min cap; on the paid $199 plan (600/min) drop to
+    # ~1.0–1.5 for near-real-time candle reconciliation. (client 2026-07-09)
+    INFOWAY_RECONCILE_SPACING: float = 3.0
+    # REST-to-tick bridge (client 2026-07-09): the free InfoWay plan's WS
+    # subscribes OK but pushes NO live frames, so bid/ask + the forming candle
+    # freeze while REST batch_kline keeps working. When true, market-data polls
+    # REST for each forex/metals/indices symbol's latest close (~2s) and feeds
+    # it through the normal tick pipeline — restoring live prices + filling
+    # candle gaps. Per-symbol staleness gate makes it a no-op once a real WS
+    # tick streams (e.g. after buying a paid plan). Set false to disable.
+    INFOWAY_REST_BRIDGE_ENABLED: bool = False
+    # Free InfoWay plan hard-caps WS subscriptions at 10 — subscribing to more
+    # makes InfoWay REJECT the WHOLE subscription (error 516) so ZERO ticks
+    # arrive. Subscribe to ONLY these priority symbols (<=10) so the WS is
+    # accepted and streams live ticks; the rest degrade to REST/history.
+    # Crypto is served live by Binance, so keep this to forex/metals/indices.
+    # Comma-separated platform symbols; empty = all instruments (will exceed
+    # the cap on the free plan). Raise/replace this list on a paid plan.
+    INFOWAY_WS_SYMBOLS: str = "XAUUSD,XAGUSD,EURUSD,GBPUSD,USDJPY,AUDUSD,USDCAD,USDCHF,US30,US500"
 
     # ─── AllTick — market-data provider (used when InfoWay is empty) ────
     # Real-time forex / metals / crypto / indices CFD ticks via WebSocket.
@@ -218,6 +247,12 @@ class Settings(BaseSettings):
     NOWPAYMENTS_IPN_SECRET: str = ""    # IPN HMAC secret from dashboard
     NOWPAYMENTS_SANDBOX: bool = False
     NOWPAYMENTS_CALLBACK_BASE_URL: str = ""  # e.g. "https://api.swisdex.com"
+    # Automatic crypto WITHDRAWALS (payouts) use the /v1/payout API, which needs
+    # a JWT obtained from the account login (separate from the x-api-key used for
+    # deposits). Disable whitelisting + 2FA on the NOWPayments dashboard for
+    # unattended payouts. Leave blank to keep withdrawals fully manual.
+    NOWPAYMENTS_EMAIL: str = ""
+    NOWPAYMENTS_PASSWORD: str = ""
 
     # Absolute path recommended in production (writable volume). Relative paths are resolved from gateway CWD.
     KYC_UPLOAD_ROOT: str = "uploads/kyc"
@@ -236,6 +271,10 @@ class Settings(BaseSettings):
 
     class Config:
         env_file = ".env"
+        # Tolerate env vars meant for OTHER services in a shared .env (e.g. the
+        # market-data timescale_* keys). Without this, an unrelated extra key
+        # crashes startup with extra_forbidden (2026-06-26).
+        extra = "ignore"
 
     # ─── Fail-closed validation ───────────────────────────────────────────
     @model_validator(mode="after")

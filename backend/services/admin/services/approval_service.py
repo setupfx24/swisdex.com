@@ -54,9 +54,19 @@ def _check_cap(amount: Decimal) -> None:
         )
 
 
-def needs_dual_approval(amount: Decimal) -> bool:
-    threshold = Decimal(str(get_settings().ADMIN_DUAL_APPROVAL_THRESHOLD))
-    return amount >= threshold
+async def dual_approval_threshold() -> Decimal:
+    """The dual-approval threshold in USD. Admin-editable via the settings
+    store (`dual_approval_threshold_usd`), falling back to the
+    ADMIN_DUAL_APPROVAL_THRESHOLD env default (client 2026-06-23: "1000 ko
+    custom kaise karein" — now settable from Admin → Settings)."""
+    from packages.common.src.settings_store import get_float_setting
+    env_default = float(get_settings().ADMIN_DUAL_APPROVAL_THRESHOLD)
+    val = await get_float_setting("dual_approval_threshold_usd", env_default)
+    return Decimal(str(val))
+
+
+async def needs_dual_approval(amount: Decimal) -> bool:
+    return amount >= await dual_approval_threshold()
 
 
 async def request_or_execute(
@@ -91,7 +101,7 @@ async def request_or_execute(
     # exceed the cap; the two-admin sign-off is the control there.
     if not always:
         _check_cap(amount)
-        if not needs_dual_approval(amount):
+        if not await needs_dual_approval(amount):
             return None
 
     # Snapshot the requested change so the executing admin sees exactly
@@ -117,7 +127,7 @@ async def request_or_execute(
     )
     row = result.first()
     await db.commit()
-    raise ApprovalRequired(row[0], float(get_settings().ADMIN_DUAL_APPROVAL_THRESHOLD))
+    raise ApprovalRequired(row[0], float(await dual_approval_threshold()))
 
 
 async def fetch_pending(db: AsyncSession, request_id: uuid.UUID) -> dict:

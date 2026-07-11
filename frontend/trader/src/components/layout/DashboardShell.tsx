@@ -7,6 +7,7 @@ import { usePathname } from 'next/navigation';
 import { cn } from '@/lib/utils';
 import AppSidebar from './AppSidebar';
 import AppHeader from './AppHeader';
+import KycLoginPrompt from '@/components/kyc/KycLoginPrompt';
 
 export default function DashboardShell({
   children,
@@ -53,6 +54,7 @@ export default function DashboardShell({
       >
         <MessageSquare size={20} className="text-white" />
       </Link>
+      <KycLoginPrompt />
     </div>
   );
 }

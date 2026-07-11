@@ -53,8 +53,7 @@ def render_verify_email(
     )
 
     text = (
-        "Verify your SwisDex email address\n"
-        "=================================\n\n"
+        "Verify your SwisDex email address\n\n"
         f"Hi {name},\n\n"
         "Click the link below to confirm this is your email address and "
         "activate your SwisDex account.\n\n"

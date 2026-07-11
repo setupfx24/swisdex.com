@@ -166,14 +166,23 @@ class ApiClient {
     if (!res.ok) {
       const error = await res.json().catch(() => ({ detail: 'Request failed' }));
       const detail = error.detail;
+      // detail can be a plain string, a FastAPI validation array, or a
+      // structured object like {code: "email_unverified", message: "Please
+      // confirm your email…"} — surface the object's message instead of a
+      // bare "HTTP 403", and keep the code on the error for callers.
+      const structured =
+        detail && typeof detail === 'object' && !Array.isArray(detail)
+          ? (detail as { code?: string; message?: string })
+          : null;
       const msg =
         typeof detail === 'string'
           ? detail
           : Array.isArray(detail)
             ? detail.map((d: { msg?: string }) => d.msg || JSON.stringify(d)).join(', ')
-            : `HTTP ${res.status}`;
+            : structured?.message || `HTTP ${res.status}`;
       const err = new Error(msg || `HTTP ${res.status}`);
       (err as any).status = res.status;
+      if (structured?.code) (err as any).code = structured.code;
       throw err;
     }
 

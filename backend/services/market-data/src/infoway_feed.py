@@ -28,6 +28,7 @@ import contextlib
 import json
 import logging
 import secrets
+import time
 import urllib.parse
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
@@ -47,6 +48,34 @@ HEARTBEAT_INTERVAL_SEC = 25.0      # docs allow 30s; send a bit earlier for safe
 SERVER_SILENCE_THRESHOLD = 60.0    # server disconnects at 60s
 RECONNECT_BACKOFF_BASE = 2.0
 RECONNECT_BACKOFF_MAX = 60.0
+
+# --- Live → official candle reconciliation ----------------------------------
+# Our tick-aggregated candles APPROXIMATE InfoWay's official OHLC but aren't
+# byte-identical (we de-spike + sample only the ticks we receive). That left a
+# small step at the boundary between InfoWay history (getBars) and our live
+# aggregation (subscribeBars). To make CLOSED candles match the deep history —
+# and TradingView — a background loop periodically overwrites recent closed bars
+# with InfoWay's OFFICIAL values. Only the in-progress bar stays aggregator-built
+# (live), and it reconciles too the moment it closes. (client 2026-06-30)
+RECONCILE_TFS = ("5m", "1m", "15m", "30m", "1h")  # 5m first — most-viewed
+RECONCILE_COUNT = 6          # last few CLOSED bars to re-assert per (symbol, tf)
+# Free plan caps REST at 60/min (1/sec). 1.5s was too aggressive once getBars
+# + any bridge shared the budget → HTTP 429 storm. 3s keeps the reconcile at
+# ~20/min and leaves headroom for chart history fetches. (client 2026-07-09)
+# Default spacing (free plan, 60/min cap). Overridable via INFOWAY_RECONCILE_SPACING
+# — on the paid plan (600/min) drop it to ~1.0–1.5 for near-real-time closed-bar
+# reconciliation. (client 2026-07-09)
+RECONCILE_SPACING = 3.0      # seconds between REST calls — stay under the rate cap
+RECONCILE_WARMUP = 45.0      # let the feed + initial seed settle before first pass
+
+
+def _reconcile_spacing() -> float:
+    """Seconds between reconcile REST calls — env-tunable for paid plans."""
+    try:
+        from packages.common.src.config import get_settings
+        return float(getattr(get_settings(), "INFOWAY_RECONCILE_SPACING", RECONCILE_SPACING))
+    except Exception:  # noqa: BLE001
+        return RECONCILE_SPACING
 
 
 # ─── Symbol mapping ───────────────────────────────────────────────────────
@@ -170,6 +199,12 @@ class InfoWayFeed:
                     name=f"infoway-conn-{idx}",
                 )
             )
+
+        # Background: keep CLOSED candles aligned with InfoWay's official OHLC so
+        # chart history and the live edge share one basis (no seam).
+        self._tasks.append(
+            asyncio.create_task(self._reconcile_loop(), name="infoway-reconcile")
+        )
 
         await asyncio.gather(*self._tasks, return_exceptions=True)
 
@@ -314,6 +349,135 @@ class InfoWayFeed:
                 logger.debug("InfoWay heartbeat send failed: %s", exc)
                 return
 
+    async def _backfill_gap(self, conn_idx: int, codes: List[str], since_ts: float) -> None:
+        """Fill bars:{sym}:{tf} for the disconnect window [since_ts, now] from
+        InfoWay's OWN history. Per-symbol fetch (a multi-symbol batch returns
+        only 2 bars — useless for a gap), merged by time, never replacing other
+        bars. Best-effort: a failed fetch leaves an honest gap, never blocks the
+        reconnect."""
+        from packages.common.src.infoway_rest import fetch_klines
+        from .bar_aggregator import TIMEFRAMES
+
+        now = time.time()
+        gap_sec = now - since_ts
+        # Skip trivial gaps (≤ ~1 bar) and absurd ones (> 24h = cold restart, not
+        # a live-session drop — leave that to normal seeding).
+        if gap_sec < 90 or gap_sec > 86400:
+            return
+        logger.warning(
+            "InfoWay [conn-%d] disconnect window ~%.0fs — backfilling %d symbol(s) from history",
+            conn_idx, gap_sec, len(codes),
+        )
+        for code in codes:
+            plat = _platform_code_for(code, self._instruments)
+            if not plat:
+                continue
+            for tf_name, tf_sec in TIMEFRAMES.items():
+                need = int(gap_sec // tf_sec) + 3  # cover the gap + small overlap
+                if need < 1:
+                    continue
+                bars = await fetch_klines(
+                    plat, tf_name, count=min(need, 500),
+                    end_ts=int(now), token=self._token,
+                )
+                if not bars:
+                    continue
+                lo = int(since_ts) - tf_sec  # one bar of overlap before the gap
+                bars = [b for b in bars if b["time"] >= lo]
+                if bars:
+                    await self._merge_bars(plat, tf_name, tf_sec, bars)
+
+    async def _merge_bars(
+        self, symbol: str, tf_name: str, tf_sec: int, new_bars: List[dict],
+    ) -> None:
+        """Read-merge-write bars:{sym}:{tf}: overlay new_bars keyed by aligned
+        time (DEDUP), sort ascending, rewrite newest-first (the aggregator's
+        lpush convention), cap 1000. Never drops bars that aren't being
+        replaced — InfoWay history fills the hole without disturbing the rest."""
+        from packages.common.src.redis_client import redis_client
+
+        list_key = f"bars:{symbol}:{tf_name}"
+        try:
+            raw = await redis_client.lrange(list_key, 0, 999)
+            by_time: Dict[int, dict] = {}
+            for item in raw:
+                try:
+                    b = json.loads(item)
+                    by_time[int(b["time"])] = b
+                except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                    continue
+            for nb in new_bars:
+                t = (int(nb["time"]) // tf_sec) * tf_sec
+                by_time[t] = {
+                    "symbol": symbol,
+                    "timeframe": tf_name,
+                    "time": t,
+                    "open": nb["open"],
+                    "high": nb["high"],
+                    "low": nb["low"],
+                    "close": nb["close"],
+                    "volume": nb.get("volume", 0),
+                }
+            merged = sorted(by_time.values(), key=lambda b: int(b["time"]))
+            pipe = redis_client.pipeline()
+            pipe.delete(list_key)
+            for b in merged:  # oldest→newest lpush lands newest at index 0
+                pipe.lpush(list_key, json.dumps(b))
+            pipe.ltrim(list_key, 0, 999)
+            await pipe.execute()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("InfoWay merge bars failed %s %s: %s", symbol, tf_name, exc)
+
+    async def _reconcile_loop(self) -> None:
+        """Continuously re-assert InfoWay's OFFICIAL OHLC over recent CLOSED bars
+        so the chart's completed candles match the deep history exactly — no seam
+        between InfoWay history and our live tick aggregation. Round-robin across
+        all symbols + intraday timeframes, spaced to respect InfoWay's request
+        cap. The in-progress (current-period) bar is left to the aggregator; only
+        bars whose period has already ended are overwritten."""
+        from packages.common.src.infoway_rest import fetch_klines
+        from .bar_aggregator import TIMEFRAMES
+
+        try:
+            await asyncio.sleep(RECONCILE_WARMUP)
+        except asyncio.CancelledError:
+            return
+
+        while self._running:
+            codes = sorted({_infoway_code_for(s) for s in self._instruments.keys()})
+            # TF-major: re-assert the most-viewed timeframe (5m) across EVERY
+            # symbol first, then the next, so a given symbol's 5m chart goes
+            # InfoWay-official within one symbol-sweep (~symbols × spacing), not a
+            # full all-TF cycle.
+            for tf_name in RECONCILE_TFS:
+                tf_sec = TIMEFRAMES.get(tf_name)
+                if not tf_sec:
+                    continue
+                for code in codes:
+                    if not self._running:
+                        return
+                    plat = _platform_code_for(code, self._instruments)
+                    if not plat:
+                        continue
+                    try:
+                        now = int(time.time())
+                        bars = await fetch_klines(
+                            plat, tf_name, count=RECONCILE_COUNT,
+                            end_ts=now, token=self._token,
+                        )
+                        if bars:
+                            # Only CLOSED periods — never clobber the live bar.
+                            cur_start = (now // tf_sec) * tf_sec
+                            closed = [b for b in bars if int(b["time"]) < cur_start]
+                            if closed:
+                                await self._merge_bars(plat, tf_name, tf_sec, closed)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("InfoWay reconcile %s %s failed: %s", plat, tf_name, exc)
+                    try:
+                        await asyncio.sleep(_reconcile_spacing())
+                    except asyncio.CancelledError:
+                        return
+
     async def _run_socket(self, conn_idx: int, codes: List[str]) -> None:
         url = self._ws_url()
         # InfoWay accepts a comma-separated list under `codes` (string).
@@ -345,6 +509,13 @@ class InfoWayFeed:
                         len(codes),
                     )
                     backoff = RECONNECT_BACKOFF_BASE
+
+                    # Backfill the window we were disconnected for from InfoWay's
+                    # OWN history (same source → no price-basis seam) BEFORE
+                    # resuming live, so the chart has no gap/jump. Skips the very
+                    # first connect (_last_msg_ts == 0) and clamps the gap.
+                    if self._last_msg_ts > 0:
+                        await self._backfill_gap(conn_idx, codes, self._last_msg_ts)
 
                     hb_task = asyncio.create_task(
                         self._heartbeat_loop(ws),

@@ -4,16 +4,18 @@ import { useEffect, useState, useCallback } from 'react';
 import { adminApi } from '@/lib/api';
 import { useAuthStore } from '@/stores/authStore';
 import { cn } from '@/lib/utils';
-import { Loader2, Plus, Pencil, Trash2, RefreshCw, UserCog, Activity, LogIn, ShieldCheck, Copy, Check } from 'lucide-react';
+import { Loader2, Plus, Pencil, Trash2, RefreshCw, UserCog, Activity, LogIn, ShieldCheck, Copy, Check, KeyRound } from 'lucide-react';
 import toast from 'react-hot-toast';
 
 interface Employee {
   id: string;
+  user_id: string;
   email: string;
   full_name: string;
   role: string;
   phone?: string;
   is_active: boolean;
+  deleted?: boolean;
   last_active?: string;
   created_at: string;
   extra_permissions?: string[];
@@ -295,9 +297,15 @@ export default function EmployeesPage() {
                         <span className={cn('inline-flex px-1.5 py-0.5 rounded-sm text-xxs font-medium', roleBadgeClass(emp.role))}>{emp.role}</span>
                       </td>
                       <td className="px-4 py-2.5">
-                        <button onClick={() => toggleActive(emp)} className={cn('inline-flex px-1.5 py-0.5 rounded-sm text-xxs font-medium cursor-pointer transition-fast', emp.is_active ? 'bg-success/15 text-success hover:bg-success/25' : 'bg-text-tertiary/15 text-text-tertiary hover:bg-text-tertiary/25')}>
-                          {emp.is_active ? 'Active' : 'Inactive'}
-                        </button>
+                        {emp.deleted ? (
+                          <span className="inline-flex px-1.5 py-0.5 rounded-sm text-xxs font-medium bg-danger/15 text-danger" title="This employee was deleted; their record is kept for history.">
+                            Deleted
+                          </span>
+                        ) : (
+                          <button onClick={() => toggleActive(emp)} className={cn('inline-flex px-1.5 py-0.5 rounded-sm text-xxs font-medium cursor-pointer transition-fast', emp.is_active ? 'bg-success/15 text-success hover:bg-success/25' : 'bg-text-tertiary/15 text-text-tertiary hover:bg-text-tertiary/25')}>
+                            {emp.is_active ? 'Active' : 'Inactive'}
+                          </button>
+                        )}
                       </td>
                       <td className="px-4 py-2.5 text-xs text-text-tertiary font-mono tabular-nums">{emp.last_active || '—'}</td>
                       <td className="px-4 py-2.5 text-right">
@@ -326,6 +334,20 @@ export default function EmployeesPage() {
                           </button>
                           <button onClick={() => openEdit(emp)} className="p-1 rounded-md text-text-secondary border border-border-primary hover:bg-bg-hover transition-fast" title="Edit">
                             <Pencil size={12} />
+                          </button>
+                          <button
+                            onClick={async () => {
+                              const pwd = window.prompt(`Set a new password for ${emp.full_name || emp.email}\n(leave blank to auto-generate a strong one):`, '');
+                              if (pwd === null) return;
+                              try {
+                                const res = await adminApi.post<{ password?: string }>(`/users/${emp.user_id}/set-password`, { password: pwd || undefined });
+                                window.alert(`New password for ${emp.email}:\n\n${res.password || pwd}\n\nHand this to the employee. Their existing sessions are now logged out.`);
+                              } catch (e: any) { toast.error(e?.message || 'Failed to set password'); }
+                            }}
+                            className="p-1 rounded-md text-warning border border-warning/30 hover:bg-warning/15 transition-fast"
+                            title="Set Password"
+                          >
+                            <KeyRound size={12} />
                           </button>
                           <button onClick={() => setDeleteConfirm(emp.id)} className="p-1 rounded-md text-danger border border-danger/30 hover:bg-danger/15 transition-fast" title="Delete">
                             <Trash2 size={12} />

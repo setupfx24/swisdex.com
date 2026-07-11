@@ -2,6 +2,7 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from packages.common.src.database import get_db
@@ -23,6 +24,24 @@ async def my_referral_dashboard(
     commission they've earned, and the current admin-set %.
     """
     return await referral_service.get_my_referral_dashboard(db, current_user["user_id"])
+
+
+class FrReferralModeRequest(BaseModel):
+    mode: str
+
+
+@router.put("/referral/fr-mode")
+async def set_fr_referral_mode(
+    req: FrReferralModeRequest,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Set the referrer's global AI-Powered-Staking referral payout mode
+    ('principal' or 'interest')."""
+    mode = await referral_service.set_fr_referral_mode(
+        db, current_user["user_id"], req.mode,
+    )
+    return {"fr_referral_mode": mode}
 
 
 @router.get("/referral/list")

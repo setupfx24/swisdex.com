@@ -161,7 +161,8 @@ export default function MobileBottomNav() {
     isLandingPage || pathname === '/privacy' || pathname === '/terms' ||
     pathname === '/risk' || pathname === '/about' || pathname === '/contact' ||
     pathname === '/platforms' || pathname === '/white-label';
-  if (pathname?.startsWith('/auth') || isPublicPage) return null;
+  // Hide on the focused full-screen deposit checkout (client 2026-06-24).
+  if (pathname?.startsWith('/auth') || pathname?.startsWith('/wallet/deposit') || isPublicPage) return null;
 
   const currentView = searchParams.get('view') || '';
   const isTradingArea = pathname?.startsWith('/trading');

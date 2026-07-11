@@ -17,6 +17,27 @@ interface ReferralDashboard {
   pending_referrals?: number;
   total_earned: number;
   required_trades?: number;
+  // AI-Powered-Staking referral payout mode + admin-set percentages.
+  fr_referral_mode?: 'principal' | 'interest';
+  fr_referral_principal_pct?: number;
+  fr_referral_interest_pct?: number;
+  // The user's EFFECTIVE rate (custom override if admin set one, else global).
+  fr_referral_principal_pct_effective?: number;
+  fr_referral_interest_pct_effective?: number;
+  // Promotional EXTRA income — the premium paid above the standard rate via a
+  // custom per-user offer.
+  extra_income?: number;
+  extra_income_ledger?: { amount: number; note: string; created_at: string | null }[];
+  // Per-entry commission breakdown — direct bounty vs AI-Powered-Staking, each
+  // attributed to the referred user by name.
+  commission_ledger?: CommissionLedgerEntry[];
+}
+
+interface CommissionLedgerEntry {
+  amount: number;
+  description: string;
+  source: 'staking' | 'referral';
+  created_at: string | null;
 }
 
 interface ReferralRow {
@@ -163,6 +184,15 @@ export default function ReferralPage() {
             value={`$${fmt(head?.total_earned ?? 0)}`}
             tone="text-buy"
           />
+          {(head?.extra_income ?? 0) > 0 && (
+            <StatCard
+              icon={<Gift size={12} />}
+              label="Extra income"
+              value={`$${fmt(head?.extra_income ?? 0)}`}
+              tone="text-buy"
+              sub="bonus rate offered to you"
+            />
+          )}
         </section>
 
         {/* Withdraw bar — only when there's something to move */}
@@ -223,6 +253,86 @@ export default function ReferralPage() {
         ) : (
           <section className="rounded-xl border border-border-primary bg-card p-6 text-center text-sm text-text-secondary">
             Your referral code is being generated. Refresh the page in a moment.
+          </section>
+        )}
+
+        {/* Commission breakdown — where each chunk came from + which friend */}
+        {(head?.commission_ledger?.length ?? 0) > 0 && (
+          <section className="rounded-xl border border-border-primary bg-card p-5 space-y-3">
+            <div>
+              <p className="text-sm font-semibold text-text-primary">Commission breakdown</p>
+              <p className="text-[11px] text-text-tertiary mt-0.5">
+                Where each commission came from — direct referral bounty vs AI Powered Staking — and from which friend.
+              </p>
+            </div>
+            <div className="divide-y divide-border-primary/60 -mt-1">
+              {head!.commission_ledger!.map((e, i) => (
+                <div key={i} className="flex items-center justify-between gap-3 py-2.5">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={`shrink-0 text-[10px] font-semibold px-1.5 py-0.5 rounded uppercase tracking-wide ${
+                          e.source === 'staking' ? 'bg-accent/15 text-accent' : 'bg-buy/15 text-buy'
+                        }`}
+                      >
+                        {e.source === 'staking' ? 'Staking' : 'Referral'}
+                      </span>
+                      <span className="text-xs text-text-secondary truncate">{e.description}</span>
+                    </div>
+                    {e.created_at && (
+                      <span className="text-[10px] text-text-tertiary">
+                        {new Date(e.created_at).toLocaleDateString()}
+                      </span>
+                    )}
+                  </div>
+                  <span className="shrink-0 font-mono tabular-nums text-buy font-semibold">
+                    +${fmt(e.amount)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {/* AI-Powered-Staking referral payout mode (client 2026-06-30) */}
+        {head?.referral_code && (
+          <section className="rounded-xl border border-border-primary bg-card p-5 space-y-3">
+            <div>
+              <p className="text-sm font-semibold text-text-primary">AI Powered Staking — referral payout</p>
+              <p className="text-[11px] text-text-tertiary mt-0.5">
+                When someone you referred locks into AI Powered Staking, choose how your commission is paid.
+              </p>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              {([
+                { mode: 'principal' as const, label: 'On principal', pct: head.fr_referral_principal_pct_effective ?? head.fr_referral_principal_pct ?? 0, desc: 'Paid once when they lock — % of their principal.' },
+                { mode: 'interest' as const, label: 'On interest', pct: head.fr_referral_interest_pct_effective ?? head.fr_referral_interest_pct ?? 0, desc: 'Paid on every interest payout — % of each payout.' },
+              ]).map((opt) => {
+                const active = (head.fr_referral_mode ?? 'principal') === opt.mode;
+                return (
+                  <button
+                    key={opt.mode}
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        await api.put('/business/referral/fr-mode', { mode: opt.mode });
+                        setHead((h) => (h ? { ...h, fr_referral_mode: opt.mode } : h));
+                        toast.success('Payout mode saved');
+                      } catch (e: any) { toast.error(e?.message || 'Failed to save'); }
+                    }}
+                    className={`text-left rounded-lg border p-3 transition-colors ${active ? 'border-accent bg-accent/10' : 'border-border-primary hover:bg-bg-hover/30'}`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold text-text-primary">{opt.label}</span>
+                      <span className="text-xs font-mono text-accent">{opt.pct}%</span>
+                    </div>
+                    <p className="text-[10px] text-text-tertiary mt-1">{opt.desc}</p>
+                    {active && <span className="inline-block mt-1.5 text-[10px] text-accent">✓ Selected</span>}
+                  </button>
+                );
+              })}
+            </div>
+            <p className="text-[10px] text-text-tertiary">Commission lands in your referral balance above — withdraw it from here.</p>
           </section>
         )}
 

@@ -145,9 +145,10 @@ function LoginContent() {
       router.push('/dashboard');
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : '';
+      const code = (err as { code?: string })?.code;
       if (msg.includes('2FA') && !msg.includes('Invalid')) {
         setNeed2FA(true);
-      } else if (msg.includes('email_unverified') || msg.includes('confirm your email')) {
+      } else if (code === 'email_unverified' || msg.includes('email_unverified') || msg.includes('confirm your email')) {
         // Backend returned 403 with code=email_unverified. Bounce the user
         // back to /auth/check-email with their address pre-filled so the
         // resend-link button works without retyping.

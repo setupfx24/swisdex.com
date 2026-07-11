@@ -28,6 +28,8 @@ async def list_account_types(db: AsyncSession) -> dict:
                 is_demo=bool(g.is_demo),
                 is_active=bool(g.is_active),
                 insurance_enabled=bool(getattr(g, "insurance_enabled", True)),
+                is_cent_account=bool(getattr(g, "is_cent_account", False)),
+                lot_size_multiplier=float(getattr(g, "lot_size_multiplier", None) or 1.0),
                 created_at=g.created_at,
             )
             for g in rows
@@ -62,6 +64,8 @@ async def create_account_type(
         is_demo=body.is_demo,
         is_active=body.is_active,
         insurance_enabled=body.insurance_enabled,
+        is_cent_account=body.is_cent_account,
+        lot_size_multiplier=body.lot_size_multiplier,
     )
     db.add(g)
     await db.flush()
@@ -103,6 +107,8 @@ async def update_account_type(
     g.is_demo = body.is_demo
     g.is_active = body.is_active
     g.insurance_enabled = body.insurance_enabled
+    g.is_cent_account = body.is_cent_account
+    g.lot_size_multiplier = body.lot_size_multiplier
 
     await write_audit_log(
         db, admin_id, "update_account_type", "account_group", group_id,

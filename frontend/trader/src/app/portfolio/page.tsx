@@ -18,7 +18,6 @@ import { Tabs } from '@/components/ui/Tabs';
 
 import DashboardShell from '@/components/layout/DashboardShell';
 
-import DatePicker from '@/components/forms/DatePicker';
 
 import TradingOverview from '@/components/profile/TradingOverview';
 
@@ -175,22 +174,6 @@ function tradeExitLabel(
 
 
 
-const TIMEFRAMES = ['1M', '3M', '6M', '1Y', 'All', 'Custom'] as const;
-
-const TF_TO_PERIOD: Record<string, string> = {
-
-  '1M': '1m', '3M': '3m', '6M': '6m', '1Y': '1y', 'All': 'all', 'Custom': 'custom',
-
-};
-
-/** YYYY-MM-DD in local time (avoids the UTC-shift `toISOString()` pitfall). */
-function ymd(d: Date): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
-}
-
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -211,16 +194,6 @@ function PortfolioPageContent() {
     const v = new URLSearchParams(queryKey).get('account_no');
     return v?.trim() ? v.trim() : '';
   }, [queryKey]);
-
-  const [tf, setTf] = useState('1M');
-  // Custom date-range state (only used when tf === 'Custom').
-  // Backend endpoint accepts ISO datetimes; we send the date in YYYY-MM-DD
-  // form and let server-side defaults treat them as 00:00 UTC / 23:59 UTC.
-  const [customFrom, setCustomFrom] = useState<string>(() => {
-    const d = new Date(); d.setMonth(d.getMonth() - 1);
-    return ymd(d);
-  });
-  const [customTo, setCustomTo] = useState<string>(() => ymd(new Date()));
 
   const [tab, setTab] = useState('overview');
 
@@ -254,7 +227,7 @@ function PortfolioPageContent() {
 
       setError(null);
 
-      const period = TF_TO_PERIOD[tf] || 'all';
+      const period = 'all';
 
       const summaryParams: Record<string, string> | undefined = validAccountId
 
@@ -269,22 +242,6 @@ function PortfolioPageContent() {
       const tradeParams: Record<string, string> = { page: '1', per_page: '200' };
 
       if (validAccountId) tradeParams.account_id = validAccountId;
-
-      // Custom-range mode: forward date_from / date_to to both performance
-      // (so the equity curve + breakdowns are scoped) and trades (so the
-      // table only shows trades within the picked window). The backend's
-      // /portfolio/trades endpoint already accepted these; we now also
-      // pass them to /portfolio/performance (period='custom').
-      if (period === 'custom') {
-        if (customFrom) {
-          perfParams.date_from = `${customFrom}T00:00:00`;
-          tradeParams.date_from = `${customFrom}T00:00:00`;
-        }
-        if (customTo) {
-          perfParams.date_to = `${customTo}T23:59:59`;
-          tradeParams.date_to = `${customTo}T23:59:59`;
-        }
-      }
 
       const [sumRes, perfRes, tradesRes] = await Promise.all([
 
@@ -316,7 +273,7 @@ function PortfolioPageContent() {
 
     }
 
-  }, [tf, validAccountId, customFrom, customTo]);
+  }, [validAccountId]);
 
 
 
@@ -376,14 +333,6 @@ function PortfolioPageContent() {
 
         if (validAccountId) params.account_id = validAccountId;
 
-        // PDF export honours the same custom date range the user picked
-        // for performance — otherwise the statement would include trades
-        // outside the visible chart, which is confusing.
-        if (TF_TO_PERIOD[tf] === 'custom') {
-          if (customFrom) params.date_from = `${customFrom}T00:00:00`;
-          if (customTo) params.date_to = `${customTo}T23:59:59`;
-        }
-
         const res = await api.get<{ items: Trade[]; pages: number }>(
 
           '/portfolio/trades',
@@ -438,10 +387,7 @@ function PortfolioPageContent() {
           accountLabel: validAccountId
             ? (accountNoLabel ? `#${accountNoLabel}` : validAccountId)
             : 'All accounts',
-          periodLabel:
-            TF_TO_PERIOD[tf] === 'custom' && (customFrom || customTo)
-              ? `${customFrom || '…'} → ${customTo || '…'}`
-              : undefined,
+          periodLabel: undefined,
         },
       );
 
@@ -506,11 +452,11 @@ function PortfolioPageContent() {
     const freeMargin = Math.max(0, equity - approxUsedMargin);
     const marginLevel =
       approxUsedMargin > 0 ? `${((equity / approxUsedMargin) * 100).toFixed(1)}%` : null;
-    const periodKey = TF_TO_PERIOD[tf] || 'all';
+    // Portfolio is always all-time now (the timeframe selector was removed).
     const periodPnl =
-      periodKey === '1m' ? summary.pnl_breakdown?.this_month ?? 0 :
-      periodKey === 'all' ? summary.pnl_breakdown?.all_time ?? 0 :
-      summary.pnl_breakdown?.this_month ?? 0;
+      typeof performance?.stats?.total_return === 'number'
+        ? performance.stats.total_return
+        : summary.pnl_breakdown?.all_time ?? 0;
     return buildDashboardFromPortfolio({
       balance,
       equity,
@@ -527,7 +473,7 @@ function PortfolioPageContent() {
       marginLevel,
       currency: 'USD',
     });
-  }, [summary, performance, allTrades, tf]);
+  }, [summary, performance, allTrades]);
 
   const tabs = [
 
@@ -613,48 +559,6 @@ function PortfolioPageContent() {
             >
               View all accounts
             </Link>
-          </div>
-        ) : null}
-
-        {dashboardData ? (
-          <div className="flex items-center justify-end gap-2 flex-wrap -mb-2">
-            {/* Custom date inputs — only render when 'Custom' is the active
-                timeframe so the existing preset row stays compact. The
-                inputs auto-flip the active tf to 'Custom' if the user
-                edits one without first clicking the preset, but here
-                they're hidden until selected to avoid clutter. */}
-            {tf === 'Custom' && (
-              <div className="flex items-center gap-1.5 mr-1">
-                <DatePicker
-                  value={customFrom}
-                  onChange={setCustomFrom}
-                  max={customTo || undefined}
-                  placeholder="From"
-                />
-                <span className="text-[10px] text-text-tertiary">to</span>
-                <DatePicker
-                  value={customTo}
-                  onChange={setCustomTo}
-                  min={customFrom || undefined}
-                  max={ymd(new Date())}
-                  placeholder="To"
-                />
-              </div>
-            )}
-            <div className="flex items-center gap-0.5">
-              {TIMEFRAMES.map((t) => (
-                <button
-                  key={t}
-                  onClick={() => setTf(t)}
-                  className={clsx(
-                    'px-2 py-1 text-[10px] rounded-md transition-all',
-                    tf === t ? 'skeu-btn-buy text-text-inverse' : 'text-text-tertiary hover:bg-bg-hover',
-                  )}
-                >
-                  {t}
-                </button>
-              ))}
-            </div>
           </div>
         ) : null}
 

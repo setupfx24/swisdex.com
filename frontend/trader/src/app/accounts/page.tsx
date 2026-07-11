@@ -128,6 +128,7 @@ export default function AccountsPage() {
   const [transferSubmitting, setTransferSubmitting] = useState(false);
   const [accountPickerOpen, setAccountPickerOpen] = useState(false);
   const [kycGateOpen, setKycGateOpen] = useState(false);
+  const kycAutoShown = useRef(false);
   const [demoUpgradeOpen, setDemoUpgradeOpen] = useState(false);
   /** After creating an account, open-account sets sessionStorage; expand that card on Accounts. */
   const [expandAccountId, setExpandAccountId] = useState<string | null>(null);
@@ -139,6 +140,11 @@ export default function AccountsPage() {
   /** Unified transfer source/dest ID: 'wallet' or account UUID. */
   const [uniFrom, setUniFrom] = useState('wallet');
   const [uniTo, setUniTo] = useState('');
+  // Agreement to the credit-forfeit rule when a transfer OUT of a trading
+  // account would drop its balance below its bonus credit.
+  const [transferAgree, setTransferAgree] = useState(false);
+  // Proper confirmation popup shown when a transfer would forfeit bonus credit.
+  const [forfeitConfirmOpen, setForfeitConfirmOpen] = useState(false);
   const [uniInitialized, setUniInitialized] = useState(false);
 
   const fetchWalletSummary = useCallback(async () => {
@@ -238,6 +244,25 @@ export default function AccountsPage() {
     }
   }, [liveAccounts.length, fromKind, toKind]);
 
+  // Proactively show the KYC prompt once for an unverified LIVE user who has no
+  // live account yet — so the popup actually appears without them having to
+  // click "New Account" (client 2026-06-20: "KYC popup nahi aa raha").
+  useEffect(() => {
+    if (kycAutoShown.current || loading || !user) return;
+    // Sequence onboarding: while the profile is incomplete the
+    // ProfileCompleteGate (blocking modal) owns the screen — don't auto-pop
+    // the "Complete KYC to open a live account" gate on top of it. Once the
+    // profile is done this effect re-runs and the KYC gate can show (client
+    // 2026-06-24: "pehle profile form, fir KYC").
+    if (user.profile_complete === false) return;
+    const kyc = (user.kyc_status || 'pending').toLowerCase();
+    const approved = kyc === 'approved' || kyc === 'verified';
+    if (!user.is_demo && !approved && liveAccounts.length === 0) {
+      kycAutoShown.current = true;
+      setKycGateOpen(true);
+    }
+  }, [loading, user, liveAccounts.length]);
+
   /* Show all active accounts. CF/IF (follower copy-trade / managed sub-accounts)
      render with "View Trades" instead of Trade — the copy engine places trades
      there automatically. Pool accounts (CT/PM/MM) shown for master funding.
@@ -298,14 +323,21 @@ export default function AccountsPage() {
   /* ── Unified transfer helpers ── */
   useEffect(() => {
     if (uniInitialized || loading) return;
+    // Only mark initialised once we've actually picked valid accounts. If the
+    // effect fires while liveAccounts is still empty (loading flipped before
+    // the list arrived), marking it initialised left uniTo='' forever — the
+    // <select> then showed the first option while the state stayed empty, so
+    // the transfer POSTed an empty UUID (client 2026-06-26).
     if (liveAccounts.length >= 2) {
       setUniFrom(liveAccounts[0].id);
       setUniTo(liveAccounts[1].id);
+      setUniInitialized(true);
     } else if (liveAccounts.length === 1) {
       setUniFrom('wallet');
       setUniTo(liveAccounts[0].id);
+      setUniInitialized(true);
     }
-    setUniInitialized(true);
+    // 0 accounts → leave un-initialised; re-runs when the list loads.
   }, [loading, liveAccounts, uniInitialized]);
 
   /** All selectable options: wallet + each live account */
@@ -330,7 +362,23 @@ export default function AccountsPage() {
     return a ? Math.max(0, Number(a.free_margin ?? 0)) : 0;
   }, [uniFrom, liveAccounts, mainWalletBalance]);
 
+  // Credit-forfeit warning: moving money OUT of a trading account that drops
+  // its balance below its bonus credit forfeits the whole (non-insurance)
+  // credit (client 2026-06-26).
+  const uniFromAccount = useMemo(
+    () => (uniFrom === 'wallet' ? null : liveAccounts.find((x) => x.id === uniFrom) ?? null),
+    [uniFrom, liveAccounts],
+  );
+  const uniFromCredit = Number(uniFromAccount?.credit ?? 0);
+  const uniWouldForfeit = useMemo(() => {
+    if (!uniFromAccount || uniFromCredit <= 0) return false;
+    const amt = parseFloat(transferAmount);
+    if (Number.isNaN(amt) || amt <= 0) return false;
+    return (Number(uniFromAccount.balance ?? 0) - amt) < uniFromCredit;
+  }, [uniFromAccount, uniFromCredit, transferAmount]);
+
   const swapFromTo = () => {
+    setTransferAgree(false);
     const prev = uniFrom;
     setUniFrom(uniTo);
     setUniTo(prev);
@@ -338,11 +386,18 @@ export default function AccountsPage() {
 
   const submitUnifiedTransfer = async () => {
     if (demoFundingBlocked) { toast.error(DEMO_FUNDING_MSG); return; }
-    const amt = parseFloat(transferAmount);
+    let amt = parseFloat(transferAmount);
     if (!amt || amt <= 0) { toast.error('Enter a valid amount'); return; }
+    if (!uniFrom || !uniTo) { toast.error('Select a source and destination account'); return; }
     if (uniFrom === uniTo) { toast.error('Select different source and destination'); return; }
     if (uniFrom === 'wallet' && uniTo === 'wallet') { toast.error('Cannot transfer wallet to wallet'); return; }
-    if (amt > uniFromBalance + 1e-9) { toast.error('Insufficient balance'); return; }
+    // "Max" fills the 2-decimal display, which can sit a hair above the true
+    // balance (e.g. 16694.4599 shown as 16694.46). Treat a within-1-cent
+    // overshoot as "transfer all" and send the exact balance (client 2026-06-26).
+    if (amt > uniFromBalance) {
+      if (amt - uniFromBalance <= 0.01) { amt = uniFromBalance; }
+      else { toast.error('Insufficient balance'); return; }
+    }
 
     setTransferSubmitting(true);
     try {
@@ -460,6 +515,15 @@ export default function AccountsPage() {
    *  actually selects Real. (Was: hard-blocked the picker if KYC wasn't
    *  approved, which made demo accounts unreachable for new users.) */
   const handleOpenNewAccount = () => {
+    // Unverified real users get a clear KYC prompt popup before the picker
+    // (client 2026-06-19: "kyc popup nahi aa raha"). Demo users skip it — they
+    // can only open demo accounts anyway, so go straight to the picker.
+    const kyc = (user?.kyc_status || 'pending').toLowerCase();
+    const approved = kyc === 'approved' || kyc === 'verified';
+    if (!user?.is_demo && !approved) {
+      setKycGateOpen(true);
+      return;
+    }
     setAccountPickerOpen(true);
   };
 
@@ -510,6 +574,14 @@ export default function AccountsPage() {
               className="px-5 py-2.5 rounded-lg border border-border-primary bg-bg-card text-sm font-semibold text-text-primary hover:bg-bg-hover transition-colors"
             >
               Close
+            </button>
+            {/* Demo doesn't need KYC — let the user practise right away. */}
+            <button
+              type="button"
+              onClick={() => { setKycGateOpen(false); setAccountPickerOpen(true); }}
+              className="px-5 py-2.5 rounded-lg border border-border-primary bg-bg-card text-sm font-semibold text-text-primary hover:bg-bg-hover transition-colors"
+            >
+              Open Demo instead
             </button>
             <Link
               href="/kyc"
@@ -854,16 +926,21 @@ export default function AccountsPage() {
                       min="0.01"
                       step="0.01"
                       value={transferAmount}
-                      onChange={(e) => setTransferAmount(e.target.value)}
+                      onChange={(e) => { setTransferAmount(e.target.value); setTransferAgree(false); }}
+                      onWheel={(e) => e.currentTarget.blur()}
                       placeholder="0.00"
                       className="w-full px-4 py-3.5 rounded-xl border border-border-primary bg-bg-base font-mono font-semibold text-text-primary text-base placeholder:text-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent/50"
                     />
                   </div>
 
-                  {/* ── SUBMIT ── */}
+                  {/* ── SUBMIT ── (credit-forfeit case opens the agreement
+                      modal below; the inline red banner was replaced by it) */}
                   <button
                     type="button"
-                    onClick={() => void submitUnifiedTransfer()}
+                    onClick={() => {
+                      if (uniWouldForfeit) { setTransferAgree(false); setForfeitConfirmOpen(true); }
+                      else { void submitUnifiedTransfer(); }
+                    }}
                     disabled={
                       demoFundingBlocked ||
                       transferSubmitting ||
@@ -882,6 +959,53 @@ export default function AccountsPage() {
           </div>
         )}
       </div>
+
+      {/* Bonus-forfeit confirmation popup */}
+      {forfeitConfirmOpen && (
+        <div className="fixed inset-0 z-[130] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/60" onClick={() => setForfeitConfirmOpen(false)} />
+          <div className="relative w-full max-w-sm bg-bg-secondary border border-red-500/40 rounded-2xl shadow-modal p-6 text-center space-y-4">
+            <div className="mx-auto w-12 h-12 rounded-full bg-red-500/15 flex items-center justify-center text-2xl" aria-hidden>⚠️</div>
+            <h2 className="text-base font-bold text-text-primary">Bonus credit will be forfeited</h2>
+            <p className="text-sm text-text-secondary leading-relaxed">
+              This transfer drops the account below its{' '}
+              <span className="font-bold text-text-primary">{fmt(uniFromCredit)}</span> bonus credit. Your{' '}
+              <span className="font-bold text-red-400">entire {fmt(uniFromCredit)} credit</span> will be forfeited
+              (insurance payouts are kept). This can&apos;t be undone.
+            </p>
+            <label className="flex items-start gap-2.5 rounded-xl border border-border-primary bg-bg-base px-3 py-2.5 text-left cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={transferAgree}
+                onChange={(e) => setTransferAgree(e.target.checked)}
+                className="mt-0.5 h-4 w-4 shrink-0 accent-red-500 cursor-pointer"
+              />
+              <span className="text-xs text-text-secondary leading-relaxed">
+                I agree — I understand my{' '}
+                <span className="font-bold text-red-400">{fmt(uniFromCredit)} bonus credit will be permanently forfeited</span>{' '}
+                by this transfer.
+              </span>
+            </label>
+            <div className="flex gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => { setForfeitConfirmOpen(false); setTransferAgree(false); }}
+                className="flex-1 py-2.5 rounded-xl border border-border-primary text-text-secondary hover:bg-bg-hover text-sm font-medium"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={transferSubmitting || !transferAgree}
+                onClick={() => { setForfeitConfirmOpen(false); void submitUnifiedTransfer(); }}
+                className="flex-1 py-2.5 rounded-xl bg-red-500 text-white hover:bg-red-600 text-sm font-bold disabled:opacity-45 disabled:pointer-events-none"
+              >
+                Yes, forfeit &amp; transfer
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </DashboardShell>
   );
 }

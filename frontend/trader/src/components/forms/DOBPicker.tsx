@@ -147,7 +147,9 @@ export default function DOBPicker({
             setOpen(false);
           }
         }}
-        showOutsideDays
+        // No showOutsideDays — each month must start at the 1st with no
+        // trailing/leading days from the prev/next month (client 2026-06-24:
+        // "har month sirf 1 se start ho", was showing 28,29,30,31,1,2).
         captionLayout="dropdown"
         startMonth={minDate}
         endMonth={maxDate}

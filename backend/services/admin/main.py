@@ -19,6 +19,7 @@ from routes import (
     insurance as insurance_admin, play_zone as play_zone_admin,
     lifestyle as lifestyle_admin, approvals, notifications, broadcast,
     fixed_return as fixed_return_admin, rm as rm_admin, tasks as tasks_admin,
+    expenses as expenses_admin, risk as risk_admin,
 )
 
 app_settings = get_settings()
@@ -224,6 +225,8 @@ app.include_router(approvals.router, prefix=f"{prefix}/approvals", tags=["Approv
 app.include_router(notifications.router, prefix=prefix)
 app.include_router(broadcast.router, prefix=prefix)
 app.include_router(rm_admin.router, prefix=prefix)
+app.include_router(expenses_admin.router, prefix=prefix)
+app.include_router(risk_admin.router, prefix=prefix)
 
 
 @app.get("/health")

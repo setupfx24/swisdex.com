@@ -37,6 +37,16 @@
 }
 
 /* —— Light theme —— */
+/* Logo per theme (match the trader app, client 2026-06-24): the white
+   wordmark (swisdex_png5) shows on the dark theme, and the dark/colour
+   wordmark (swisdex_png) shows on the light theme — no dark chip / filter. */
+.swisdex-logo-light { display: none; }
+.swisdex-logo-dark { display: block; }
+html.light .swisdex-logo-dark,
+[data-theme='light'] .swisdex-logo-dark { display: none; }
+html.light .swisdex-logo-light,
+[data-theme='light'] .swisdex-logo-light { display: block; }
+
 html.light, [data-theme='light'] {
   color-scheme: light;
   --c-bg-page: 242 239 233;

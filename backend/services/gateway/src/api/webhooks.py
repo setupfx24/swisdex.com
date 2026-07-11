@@ -122,3 +122,47 @@ async def nowpayments_webhook(
     )
 
     return {"status": "ok"}
+
+
+@router.post("/nowpayments-payout")
+async def nowpayments_payout_webhook(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """NOWPayments PAYOUT IPN — updates an automatic crypto withdrawal's status.
+
+    Same HMAC-SHA512 / sorted-JSON verification as the deposit IPN. Correlates
+    on the payout batch id we stored on the withdrawal. finished → completed;
+    failed/rejected/expired → failed + wallet refund (handled in wallet_service).
+    """
+    raw_body = await request.body()
+    sig = (
+        request.headers.get("x-nowpayments-sig")
+        or request.headers.get("X-Nowpayments-Sig")
+        or ""
+    )
+    if not nowpayments_service.verify_webhook_signature(raw_body, sig):
+        logger.warning("NOWPayments payout webhook: invalid HMAC signature")
+        raise HTTPException(status_code=403, detail="Invalid signature")
+    try:
+        payload = json.loads(raw_body)
+    except (json.JSONDecodeError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    batch_id = str(payload.get("batch_withdrawal_id") or payload.get("id") or "")
+    status = payload.get("status") or payload.get("payment_status")
+    if not batch_id or not status:
+        return {"status": "ignored"}
+
+    dedup_id = f"payout:{batch_id}:{payload.get('id')}:{status}"
+    if not await claim_webhook(
+        db, provider="nowpayments-payout", external_id=dedup_id,
+        event_type=str(status), raw_body=raw_body,
+    ):
+        return {"status": "duplicate"}
+
+    logger.info("NOWPayments payout webhook: batch=%s status=%s", batch_id, status)
+    await wallet_service.handle_nowpayments_payout_webhook(
+        batch_id=batch_id, status=str(status), payload=payload, db=db,
+    )
+    return {"status": "ok"}

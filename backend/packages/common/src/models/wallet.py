@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
-    Column, String, Boolean, Integer, DateTime, ForeignKey, Text, Numeric,
+    Column, String, Boolean, Integer, DateTime, Date, ForeignKey, Text, Numeric,
 )
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
@@ -28,6 +28,37 @@ class BankAccount(Base):
     rotation_order = Column(Integer, default=0)
     last_used_at = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class PaymentMethod(Base):
+    """Per-method deposit config (migration 0083) — each method (UPI, Local
+    Bank, ...) has its own admin-set QR / UPI / bank text, the notice +
+    declaration the user accepts, min/max and pay currency. Funds settle in USD
+    in the main wallet after live conversion."""
+    __tablename__ = "payment_methods"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    method_key = Column(String(40), unique=True, nullable=False)
+    display_name = Column(String(100), nullable=False)
+    enabled = Column(Boolean, nullable=False, default=True)
+    sort_order = Column(Integer, nullable=False, default=0)
+    pay_currency = Column(String(10), nullable=False, default="INR")
+    qr_image = Column(Text)        # base64 data-URL
+    upi_id = Column(String(255))
+    bank_text = Column(Text)
+    notice = Column(Text)          # step-2 "Accept & Continue" note
+    declaration = Column(Text)     # step-4 checkbox text
+    min_amount = Column(Numeric(18, 2))
+    max_amount = Column(Numeric(18, 2))
+    # Admin-fixed rate = the DOLLAR PRICE: how many pay_currency units make 1
+    # USD (e.g. 83 ⇒ 1 USD = 83 INR). When set, the method uses it INSTEAD of
+    # the live FX API. Deposit credits amount/rate (5000 INR ÷ 83 ≈ $60);
+    # withdrawal pays usd×rate. NULL = live API (migration 0091). Deposit and
+    # withdrawal are priced separately so admin can set a spread between them.
+    usd_rate = Column(Numeric(18, 6), nullable=True)             # deposit leg
+    withdrawal_usd_rate = Column(Numeric(18, 6), nullable=True)  # withdrawal leg
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class Deposit(Base):
@@ -71,6 +102,30 @@ class Deposit(Base):
     user = relationship("User", foreign_keys=[user_id], lazy="selectin")
 
 
+class DepositRequest(Base):
+    """A user asks an admin for personal payment details from the bank-deposit
+    page (migration 0082). Admin approves and attaches a personal QR / bank
+    text / UPI id; the user pays and finishes via the normal manual deposit."""
+    __tablename__ = "deposit_requests"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
+    amount = Column(Numeric(18, 2))
+    # pending | approved | rejected
+    status = Column(String(20), nullable=False, default="pending", index=True)
+    # Whatever the admin chooses to send back — any combination. The QR is a
+    # base64 data-URL (rendered inline like ticket attachments — no file infra).
+    admin_qr = Column(Text)
+    admin_bank_text = Column(Text)
+    admin_upi = Column(String(255))
+    admin_note = Column(Text)
+    approved_by = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+    responded_at = Column(DateTime(timezone=True))
+
+    user = relationship("User", foreign_keys=[user_id], lazy="selectin")
+
+
 class Withdrawal(Base):
     __tablename__ = "withdrawals"
 
@@ -84,6 +139,9 @@ class Withdrawal(Base):
     bank_details = Column(JSONB)
     crypto_address = Column(String(200))
     crypto_tx_hash = Column(String(200))
+    # NOWPayments payout/batch id for automatic crypto withdrawals — lets the
+    # payout IPN correlate back to this withdrawal.
+    payout_batch_id = Column(String(100))
     rejection_reason = Column(Text)
     approved_by = Column(UUID(as_uuid=True), ForeignKey("users.id"))
     approved_at = Column(DateTime(timezone=True))
@@ -106,6 +164,48 @@ class Transaction(Base):
     description = Column(Text)
     created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"))
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class PromotionalExpense(Base):
+    """Admin-logged ad-hoc promotional give-away (migration 0088).
+
+    Holds ONLY manual entries an admin records for promotional pay-outs that
+    have no existing ledger row — e.g. off-matrix extra Fixed Return interest
+    or a custom benefit. Admin-only; never shown in a user's wallet history.
+    The Promotional Expenses card sums these on top of the read-time
+    aggregates over transactions / ib_commissions.
+    """
+    __tablename__ = "promotional_expenses"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # The recipient of the give-away (nullable so a general promo cost can be
+    # logged without pinning it to one user).
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    amount = Column(Numeric(18, 2), nullable=False)
+    category = Column(String(40), nullable=False, default="manual", server_default="manual")
+    note = Column(Text)
+    created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class CompanyExpense(Base):
+    """SwisDex operating-expense ledger (migration 0089).
+
+    A Tally/Excel-style running book of the broker's own business expenses
+    (rent, salaries, marketing, tools, …). Admin-managed CRUD; unrelated to
+    user money movement. Distinct from PromotionalExpense (user give-aways).
+    """
+    __tablename__ = "company_expenses"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    expense_date = Column(Date, nullable=False)
+    name = Column(String(200), nullable=False)
+    amount = Column(Numeric(18, 2), nullable=False)
+    reason = Column(Text)
+    result = Column(Text)
+    created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class ChargeConfig(Base):

@@ -328,6 +328,11 @@ def _send_verify_email(user: User, request: Request | None = None) -> bool:
                 "verify-email NOT sent for %s: SMTP is not configured "
                 "(SMTP_HOST is empty in this service's environment)", user.email,
             )
+            # Dev-only escape hatch: sign-in is blocked until the link is
+            # clicked, so without SMTP a local signup could never log in.
+            # Print the link in the gateway log so devs can click it there.
+            if get_settings().ENVIRONMENT == "development":
+                logger.warning("DEV verify link for %s: %s", user.email, _build_verify_url(user))
             return False
         from packages.common.src.email_templates.verify_email import render_verify_email
         verify_url = _build_verify_url(user)
@@ -476,6 +481,17 @@ async def _consume_referral(db: AsyncSession, user_id: UUID, referral_code: str)
     ib_profile = ib_q.scalar_one_or_none()
     if ib_profile:
         db.add(Referral(referrer_id=ib_profile.user_id, referred_id=user_id, ib_profile_id=ib_profile.id))
+        # Also set referred_by_user_id so the IB earns the PERSONAL referral
+        # reward too (client 2026-06-23): the referral amount goes to EVERYONE
+        # who refers — including IBs — while per-lot commission stays IB-only.
+        # Without this an IB-code signup left referred_by_user_id NULL, so the
+        # IB got no referral payout on the referee's first deposit / trades.
+        new_user = (await db.execute(
+            select(User).where(User.id == user_id)
+        )).scalar_one_or_none()
+        if (new_user is not None and new_user.referred_by_user_id is None
+                and ib_profile.user_id != user_id):
+            new_user.referred_by_user_id = ib_profile.user_id
         # Best-effort: a rewards-side failure must not block the signup itself.
         try:
             from . import rewards_service
@@ -697,12 +713,13 @@ async def register_user(
         role="user",
         status="active",
         kyc_status="pending",
-        # Client 2026-06-16: AUTO-VERIFY on register so users can sign in
-        # immediately (no more 403 "email_unverified"). The verification email
-        # is still sent below (welcome + confirm link) but it no longer BLOCKS
-        # sign-in. Clicking the link later is idempotent (already verified).
-        email_verified=True,
-        email_verified_at=datetime.now(timezone.utc),
+        # Client 2026-07-10: email verification is MANDATORY again (reverses
+        # the 2026-06-16 auto-verify). login_user 403s with email_unverified
+        # until the user clicks the link; confirm_email_verification is the
+        # only path that flips this and grants the first session. Google
+        # sign-ups stay exempt — Google already asserts email_verified.
+        email_verified=False,
+        email_verified_at=None,
     )
     db.add(user)
     await db.flush()
@@ -748,14 +765,13 @@ async def register_user(
 
     await db.commit()
 
-    # Still send the verification/welcome email (client 2026-06-16 wants the
-    # email to go out), but the account is already verified so it does NOT
-    # block sign-in — the user can log in right away.
+    # Verification email is now the gate: sign-in stays blocked (403
+    # email_unverified) until the link is clicked.
     verification_sent = _send_verify_email(user, request)
     return {
         "email": user.email,
         "verification_sent": verification_sent,
-        "message": "Account created. You can sign in now.",
+        "message": "Account created. Check your email to verify and sign in.",
     }
 
 
@@ -784,6 +800,19 @@ async def login_user(
 
     if not user or not verify_password(password, user.password_hash):
         raise AuthServiceError("Invalid credentials", 401)
+
+    # Staff accounts (admins / employees) are User rows with an elevated role.
+    # They MUST sign in through the admin panel — entering staff credentials on
+    # the trader login is rejected so the admin surface never leaks into the
+    # trader app (client 2026-06-23: "superadmin credentials se user login nahi
+    # hona chahiye"). Impersonation ("Login As") is unaffected: login_as_user /
+    # login_as_employee mint a token for the TARGET user directly and never
+    # pass through this credential check.
+    if user.role in ("admin", "super_admin", "employee", "manager", "support"):
+        raise AuthServiceError(
+            "This is a staff account. Please sign in through the admin panel.",
+            403,
+        )
 
     # Gate sign-in until the user has confirmed ownership of the email.
     # Existing users (registered before migration 0038) were backfilled
@@ -819,6 +848,10 @@ async def login_user(
             )
         if not totp_code:
             raise AuthServiceError("2FA code required")
+        # Per-ACCOUNT throttle on the 2FA step (keyed on user id, not just IP)
+        # so a holder of a valid password can't brute-force the 6-digit TOTP by
+        # rotating source IPs. Legitimate users need only a couple of attempts.
+        await rate_limit_http(request, "login-2fa", 5, 300.0, extra_key=str(user.id))
         totp = pyotp.TOTP(secret)
         if not totp.verify(totp_code):
             raise AuthServiceError("Invalid 2FA code", 401)
@@ -1097,6 +1130,13 @@ async def bootstrap_session(access_token: str, request: Request, db: AsyncSessio
     try:
         payload = decode_token(access_token.strip())
     except Exception:
+        raise AuthServiceError("Invalid token", 401)
+    # Normal access tokens carry NO `type` claim; admin "Login As" impersonation
+    # tokens carry type="user" (login_as_user) and are DELIBERATELY meant to open
+    # a session for the target user. Any OTHER type (email_verify, password-reset,
+    # …) is a single-purpose link token that must NOT be exchangeable for a
+    # session — without this a leaked verify-email token could mint full cookies.
+    if payload.get("type") not in (None, "user"):
         raise AuthServiceError("Invalid token", 401)
     try:
         uid = UUID(str(payload["sub"]))

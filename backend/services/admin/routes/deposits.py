@@ -11,8 +11,104 @@ from dependencies import require_permission
 from packages.common.src.models import User
 from packages.common.src.admin_schemas import RejectRequest
 from services import deposit_service
+from services import deposit_request_service
+from services import payment_method_service
 
 router = APIRouter(prefix="/finance", tags=["Finance"])
+
+
+@router.get("/payment-methods")
+async def list_payment_methods(
+    admin: User = Depends(require_permission("deposits.view")),
+    db: AsyncSession = Depends(get_db),
+):
+    return await payment_method_service.list_all(db)
+
+
+@router.post("/payment-methods")
+async def create_payment_method(
+    body: dict,
+    request: Request,
+    admin: User = Depends(require_permission("config.update")),
+    db: AsyncSession = Depends(get_db),
+):
+    return await payment_method_service.create(
+        body, admin.id, request.client.host if request.client else None, db)
+
+
+@router.put("/payment-methods/{method_id}")
+async def update_payment_method(
+    method_id: uuid.UUID,
+    body: dict,
+    request: Request,
+    admin: User = Depends(require_permission("config.update")),
+    db: AsyncSession = Depends(get_db),
+):
+    return await payment_method_service.update(
+        method_id, body, admin.id, request.client.host if request.client else None, db)
+
+
+@router.delete("/payment-methods/{method_id}")
+async def delete_payment_method(
+    method_id: uuid.UUID,
+    request: Request,
+    admin: User = Depends(require_permission("config.update")),
+    db: AsyncSession = Depends(get_db),
+):
+    return await payment_method_service.delete(
+        method_id, admin.id, request.client.host if request.client else None, db)
+
+
+class ApproveDepositReqBody(BaseModel):
+    admin_qr: str | None = None        # base64 data-URL of the QR image
+    admin_bank_text: str | None = None
+    admin_upi: str | None = None
+    admin_note: str | None = None
+
+
+class RejectDepositReqBody(BaseModel):
+    admin_note: str | None = None
+
+
+@router.get("/deposit-requests")
+async def list_deposit_requests(
+    status: str = Query(None),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, ge=1, le=200),
+    admin: User = Depends(require_permission("deposits.view")),
+    db: AsyncSession = Depends(get_db),
+):
+    return await deposit_request_service.list_requests(status, page, per_page, db)
+
+
+@router.post("/deposit-requests/{req_id}/approve")
+async def approve_deposit_request(
+    req_id: uuid.UUID,
+    body: ApproveDepositReqBody,
+    request: Request,
+    admin: User = Depends(require_permission("deposits.approve")),
+    db: AsyncSession = Depends(get_db),
+):
+    return await deposit_request_service.approve_request(
+        req_id, admin.id,
+        admin_qr=body.admin_qr, admin_bank_text=body.admin_bank_text,
+        admin_upi=body.admin_upi, admin_note=body.admin_note,
+        ip_address=request.client.host if request.client else None, db=db,
+    )
+
+
+@router.post("/deposit-requests/{req_id}/reject")
+async def reject_deposit_request(
+    req_id: uuid.UUID,
+    body: RejectDepositReqBody,
+    request: Request,
+    admin: User = Depends(require_permission("deposits.reject")),
+    db: AsyncSession = Depends(get_db),
+):
+    return await deposit_request_service.reject_request(
+        req_id, admin.id, admin_note=body.admin_note,
+        ip_address=request.client.host if request.client else None, db=db,
+    )
 
 
 def _date_bound(value: str | None, *, end_of_day: bool):

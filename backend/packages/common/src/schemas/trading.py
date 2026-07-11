@@ -98,7 +98,11 @@ class PositionResponse(BaseModel):
 
 
 class ClosePositionRequest(BaseModel):
-    lots: Optional[Decimal] = None
+    # gt=0: a partial-close volume must be positive. Without this a trader
+    # could POST a NEGATIVE lots value, which flips the close ratio and books
+    # a losing trade as realized PROFIT while GROWING the position for free
+    # (balance-minting exploit). None still means "close the whole position".
+    lots: Optional[Decimal] = Field(default=None, gt=0)
 
 
 class ModifyPositionRequest(BaseModel):

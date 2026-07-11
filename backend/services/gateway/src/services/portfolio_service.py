@@ -14,7 +14,7 @@ from sqlalchemy.orm import selectinload
 
 from packages.common.src.models import (
     TradingAccount, Position, PositionStatus, OrderSide,
-    TradeHistory, Instrument, CopyTrade, Transaction,
+    TradeHistory, Instrument, CopyTrade, Transaction, AccountGroup,
 )
 from packages.common.src.redis_client import redis_client, PriceChannel
 
@@ -87,12 +87,25 @@ async def portfolio_summary(user_id: UUID, account_id: UUID | None, db: AsyncSes
     holdings = {}
     open_positions_detail: list[dict] = []
 
+    # Map account_id -> account so each position can be valued with its own
+    # account-group spread (same as the trade screen / close path).
+    acct_by_id = {a.id: a for a in accounts}
+    from .trading_service import user_close_quote
+
     for pos in open_positions:
         symbol = pos.instrument.symbol if pos.instrument else "?"
-        prices = await _get_current_price(symbol)
-        if prices:
-            bid, ask = prices
-            cp = bid if (pos.side == OrderSide.BUY or pos.side.value == "buy") else ask
+        # Value at the user's CLOSE quote (mid re-spread with the user's own
+        # spread), NOT the raw broadcast bid/ask — keeps floating P&L in step
+        # with what close actually realises (client 2026-06-29).
+        tick_raw = await redis_client.get(PriceChannel.tick_key(symbol))
+        if tick_raw and pos.instrument:
+            tick = json.loads(tick_raw)
+            _acct = acct_by_id.get(pos.account_id)
+            c_bid, c_ask = await user_close_quote(
+                db, pos.instrument, user_id, pos.account_id,
+                getattr(_acct, "account_group_id", None), tick,
+            )
+            cp = c_bid if (pos.side == OrderSide.BUY or pos.side.value == "buy") else c_ask
             pnl = _compute_pnl(pos, cp)
         else:
             pnl = pos.profit or Decimal("0")
@@ -111,19 +124,39 @@ async def portfolio_summary(user_id: UUID, account_id: UUID | None, db: AsyncSes
                 "symbol": symbol, "total_lots": Decimal("0"), "avg_open_price": Decimal("0"),
                 "current_price": float(cp), "unrealized_pnl": Decimal("0"),
                 "positions_count": 0, "net_side": None, "_price_sum": Decimal("0"),
+                "_notional": Decimal("0"),
             }
         h = holdings[symbol]
         h["total_lots"] += pos.lots
         h["_price_sum"] += pos.open_price * pos.lots
         h["unrealized_pnl"] += pnl
         h["positions_count"] += 1
+        h["current_price"] = float(cp)
+        # Net side for the symbol: the single position's side, or "mixed" when a
+        # user holds both a buy and a sell on the same symbol.
+        if h["net_side"] is None:
+            h["net_side"] = side_val
+        elif h["net_side"] != side_val:
+            h["net_side"] = "mixed"
+        cs = pos.instrument.contract_size if pos.instrument else None
+        if cs:
+            h["_notional"] += pos.open_price * pos.lots * Decimal(str(cs))
 
     for h in holdings.values():
         if h["total_lots"] > 0:
             h["avg_open_price"] = float(h["_price_sum"] / h["total_lots"])
         h["total_lots"] = float(h["total_lots"])
         h["unrealized_pnl"] = float(h["unrealized_pnl"])
+        notional = h.pop("_notional", Decimal("0"))
         del h["_price_sum"]
+        # Aliases the trader Portfolio page reads directly (side/lots/entry_price
+        # /pnl/pnl_pct). Without these the open-positions table showed blank
+        # Side/Lots/Entry and a $NaN P&L (field-name mismatch, client 2026-07-07).
+        h["side"] = h.get("net_side")
+        h["lots"] = h["total_lots"]
+        h["entry_price"] = h["avg_open_price"]
+        h["pnl"] = h["unrealized_pnl"]
+        h["pnl_pct"] = (h["unrealized_pnl"] / float(notional) * 100.0) if notional > 0 else 0.0
 
     now = datetime.now(timezone.utc)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -191,7 +224,7 @@ async def portfolio_performance(
         account_ids = [account_id]
 
     now = datetime.now(timezone.utc)
-    period_map = {"1m": timedelta(days=30), "3m": timedelta(days=90), "6m": timedelta(days=180), "1y": timedelta(days=365), "all": None}
+    period_map = {"1d": timedelta(days=1), "1w": timedelta(days=7), "1m": timedelta(days=30), "3m": timedelta(days=90), "6m": timedelta(days=180), "1y": timedelta(days=365), "all": None}
 
     # Custom-range mode: caller passed period='custom' with explicit dates.
     # Falls back to preset behaviour when period is one of the preset codes
@@ -364,8 +397,26 @@ async def trade_history(
     )
     trades = result.scalars().all()
 
+    # Cent accounts store ENGINE (scaled) lots in TradeHistory — e.g. a 0.05
+    # cent-lot trade is held as 0.005. The open-positions list multiplies back
+    # by 1/lot_size_multiplier for display; the history list did NOT, so it
+    # showed the scaled-down 0.005 while the running trade showed 0.05 (client
+    # 2026-06-23). Build a per-account unscale factor and apply it below.
+    unscale_by_account: dict[str, Decimal] = {}
+    if account_ids:
+        mult_rows = (await db.execute(
+            select(TradingAccount.id, AccountGroup.lot_size_multiplier)
+            .join(AccountGroup, AccountGroup.id == TradingAccount.account_group_id, isouter=True)
+            .where(TradingAccount.id.in_(account_ids))
+        )).all()
+        for aid, mult in mult_rows:
+            m = Decimal(str(mult)) if mult is not None else Decimal("1")
+            unscale_by_account[str(aid)] = (Decimal("1") / m) if m > 0 else Decimal("1")
+
     items = []
     for t in trades:
+        _uns = unscale_by_account.get(str(t.account_id), Decimal("1"))
+        _disp_lots = float(Decimal(str(t.lots)) * _uns)
         side_val = t.side.value if hasattr(t.side, 'value') else str(t.side)
         copy_trade_q = await db.execute(
             select(CopyTrade).where(CopyTrade.investor_position_id == t.position_id)
@@ -374,10 +425,16 @@ async def trade_history(
         trade_type = "copy_trade" if copy_trade else "self_trade"
         items.append({
             "id": str(t.id), "symbol": t.instrument.symbol if t.instrument else None,
-            "side": side_val, "lots": float(t.lots),
+            "side": side_val, "lots": _disp_lots,
             "open_price": float(t.open_price), "close_price": float(t.close_price),
             "swap": float(t.swap), "commission": float(t.commission),
-            "pnl": float(t.profit), "close_reason": t.close_reason or "manual",
+            # NET P&L (price P&L minus commission + swap) so the Trade History
+            # row matches the terminal's closed-position card and the dashboard
+            # (client 2026-06-19 — it showed gross here, a different number).
+            # gross_pnl kept for anyone who needs the pre-cost figure.
+            "gross_pnl": float(t.profit),
+            "pnl": float((t.profit or Decimal("0")) - (t.commission or Decimal("0")) - (t.swap or Decimal("0"))),
+            "close_reason": t.close_reason or "manual",
             "trade_type": trade_type,
             "opened_at": t.opened_at.isoformat() if t.opened_at else None,
             "close_time": t.closed_at.isoformat() if t.closed_at else None,

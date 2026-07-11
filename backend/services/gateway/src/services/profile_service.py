@@ -163,6 +163,30 @@ async def update_profile(
                     detail="Invalid date of birth — expected YYYY-MM-DD.",
                 )
 
+    # Identity lock after KYC approval (client 2026-06-23): a pending/rejected
+    # user may still fix details (e.g. a wrong DOB entered at signup), but once
+    # KYC is approved name / DOB / country / address are frozen. We only block
+    # an ACTUAL change to a locked field, so re-submitting unchanged values from
+    # the form is fine.
+    kyc = (user.kyc_status or "pending").lower()
+    if kyc in ("approved", "verified"):
+        LOCKED = ("first_name", "last_name", "date_of_birth", "country", "address", "nationality")
+        for f in LOCKED:
+            if f in update_data and update_data[f] is not None:
+                cur = getattr(user, f, None)
+                new = update_data[f]
+                if f == "date_of_birth":
+                    cur = cur.date() if hasattr(cur, "date") else cur
+                    new = new.date() if hasattr(new, "date") else new
+                    changed = cur != new
+                else:
+                    changed = str(cur or "").strip() != str(new or "").strip()
+                if changed:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Your profile is locked after KYC approval. Contact support to change verified details.",
+                    )
+
     # Snapshot completeness BEFORE applying the patch so we can detect the
     # false→true transition that should fire the welcome email.
     was_complete = _is_profile_complete(user)

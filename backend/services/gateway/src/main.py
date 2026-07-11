@@ -35,6 +35,8 @@ from .engines.deposit_reminder_engine import deposit_reminder_engine
 from .engines.fixed_return_engine import fixed_return_engine
 from .engines.eligibility_nudge_engine import eligibility_nudge_engine
 from .engines.statement_engine import statement_engine
+from .engines.payout_engine import payout_engine
+from .engines.nowpayments_reconcile_engine import nowpayments_reconcile_engine
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-5s [%(name)s] %(message)s")
 logger = logging.getLogger("gateway")
@@ -96,7 +98,11 @@ async def lifespan(app: FastAPI):
     await fixed_return_engine.start()
     await eligibility_nudge_engine.start()
     await statement_engine.start()
+    await payout_engine.start()
+    await nowpayments_reconcile_engine.start()
     yield
+    await nowpayments_reconcile_engine.stop()
+    await payout_engine.stop()
     await statement_engine.stop()
     await eligibility_nudge_engine.stop()
     await fixed_return_engine.stop()

@@ -41,6 +41,21 @@ async def get_current_price(symbol: str) -> tuple[Decimal, Decimal]:
     return Decimal(str(tick["bid"])), Decimal(str(tick["ask"]))
 
 
+async def _live_spread_mult(symbol: str) -> Decimal:
+    """The live volatility multiplier market-data published with the tick.
+    Lets per-user execution apply the SAME market-driven widening that the
+    broadcast quote already shows. 1.0 when variable spread is off/calm."""
+    try:
+        raw = await redis_client.get(PriceChannel.tick_key(symbol))
+        if raw:
+            m = Decimal(str(json.loads(raw).get("spread_mult", 1) or 1))
+            if m > 0:
+                return m
+    except Exception:
+        pass
+    return Decimal("1")
+
+
 async def validate_account(account_id: UUID, user_id: UUID, db: AsyncSession) -> TradingAccount:
     result = await db.execute(
         select(TradingAccount)
@@ -253,12 +268,17 @@ async def place_order(
                 ),
             )
 
+    # Live volatility multiplier (variable spread) — the same factor the
+    # broadcast quote already shows, so the per-scope spread we apply below
+    # widens with the market in lock-step with the displayed bid/ask.
+    _mult = await _live_spread_mult(instrument.symbol)
+
     if master_override and master_override.spread_markup_pips:
         # MAM/PAMM pool — master spread is the WHOLE spread, no
         # additive layering. Whatever account_group the pool account
         # was opened under is ignored on purpose.
         try:
-            sv_master = Decimal(str(master_override.spread_markup_pips))
+            sv_master = Decimal(str(master_override.spread_markup_pips)) * _mult
             new_bid, new_ask = symmetric_quote_from_mid(
                 mid, sv_master, "pips", pip, digits, Decimal("0"),
             )
@@ -276,11 +296,15 @@ async def place_order(
                 user_id=user_id,
                 account_group_id=account.account_group_id,
             )
-            if sv and sv > 0:
-                new_bid, new_ask = symmetric_quote_from_mid(
-                    mid, sv, st, pip, digits, Decimal("0"),
-                )
-                bid, ask = new_bid, new_ask
+            # ALWAYS derive the quote from the mid with the admin-configured
+            # spread — never fall back to the raw broadcast spread. When no
+            # spread_config matches, resolve_spread_config returns 0, so
+            # sv == 0 → bid == ask == mid → ZERO spread for that instrument
+            # (client 2026-06-29: "admin ne set nahi kiya to spread 0 hona
+            # chahiye", not the market spread).
+            bid, ask = symmetric_quote_from_mid(
+                mid, (sv or Decimal("0")) * _mult, st or "pips", pip, digits, Decimal("0"),
+            )
         except Exception as _e:
             logger.warning(
                 "Per-user spread resolution failed for %s (user=%s): %s",
@@ -482,7 +506,8 @@ async def place_order(
         db.add(position)
 
         account.margin_used = (account.margin_used or Decimal("0")) + required_margin
-        account.balance -= commission
+        # NBP: opening commission must not push the balance negative.
+        account.balance = max(Decimal("0"), (account.balance or Decimal("0")) - commission)
         account.equity = (account.balance or Decimal("0")) + (account.credit or Decimal("0")) + unrealized_pnl
         account.free_margin = account.equity - account.margin_used
 
@@ -708,7 +733,10 @@ async def modify_order(order_id: UUID, req, user_id: UUID, db: AsyncSession) -> 
 
     await validate_account(order.account_id, user_id, db)
 
-    status_val = order.status.value if hasattr(order.status, 'value') else str(order.status)
+    # Normalise robustly: SQLAlchemy may hand back an OrderStatus enum member, a
+    # raw "pending" string, or a "OrderStatus.PENDING"-style repr depending on
+    # version/how the row was written — all must compare equal to "pending".
+    status_val = str(getattr(order.status, "value", order.status)).lower().split(".")[-1]
     if status_val != "pending":
         raise HTTPException(status_code=400, detail="Can only modify pending orders")
 
@@ -734,8 +762,14 @@ async def cancel_order(order_id: UUID, user_id: UUID, db: AsyncSession) -> dict:
 
     await validate_account(order.account_id, user_id, db)
 
-    status_val = order.status.value if hasattr(order.status, 'value') else str(order.status)
+    # Normalise robustly (see modify_order) — enum member, "pending" string, or
+    # "OrderStatus.PENDING" repr must all match.
+    status_val = str(getattr(order.status, "value", order.status)).lower().split(".")[-1]
     if status_val != "pending":
+        logger.info(
+            "cancel_order rejected: order %s raw_status=%r normalised=%r",
+            order_id, order.status, status_val,
+        )
         raise HTTPException(status_code=400, detail="Can only cancel pending orders")
 
     order.status = "cancelled"
@@ -745,6 +779,52 @@ async def cancel_order(order_id: UUID, user_id: UUID, db: AsyncSession) -> dict:
 
 
 # ─── Positions ────────────────────────────────────────────────────────────
+
+async def user_close_quote(
+    db: AsyncSession,
+    instrument,
+    user_id: UUID,
+    account_id: UUID,
+    account_group_id,
+    tick: dict,
+) -> tuple[Decimal, Decimal]:
+    """The bid/ask the user would CLOSE at: the live tick MID re-spread with the
+    SAME per-user / master spread used at open and close (mirrors the close path
+    in close_position). The raw broadcast spread can be WIDER than the user's
+    configured spread, so valuing floating P&L off the raw tick showed a bigger
+    loss than the user actually realises on close — the position looked like it
+    "went straight to loss" and didn't track the displayed price (client
+    2026-06-29). Returns (close_bid, close_ask)."""
+    raw_bid = Decimal(str(tick["bid"]))
+    raw_ask = Decimal(str(tick["ask"]))
+    mid = (raw_bid + raw_ask) / Decimal("2")
+    pip = Decimal(str(getattr(instrument, "pip_size", None) or "0.0001"))
+    digits = int(getattr(instrument, "digits", None) or 5)
+    c_bid, c_ask = raw_bid, raw_ask
+    mult = await _live_spread_mult(instrument.symbol)
+    try:
+        master = (await db.execute(
+            select(MasterAccount).where(MasterAccount.account_id == account_id)
+        )).scalar_one_or_none()
+        if master and master.spread_markup_pips:
+            c_bid, c_ask = symmetric_quote_from_mid(
+                mid, Decimal(str(master.spread_markup_pips)) * mult, "pips", pip, digits, Decimal("0"),
+            )
+        else:
+            sv, st, _ = await resolve_spread_config(
+                db, instrument, user_id=user_id, account_group_id=account_group_id,
+            )
+            # No config → 0 → mid (no market spread), same as open/close.
+            c_bid, c_ask = symmetric_quote_from_mid(
+                mid, (sv or Decimal("0")) * mult, st or "pips", pip, digits, Decimal("0"),
+            )
+    except Exception as _e:
+        logger.warning(
+            "user_close_quote spread resolution failed for %s (user=%s): %s",
+            getattr(instrument, "symbol", "?"), user_id, _e,
+        )
+    return c_bid, c_ask
+
 
 async def list_positions(account_id: UUID, user_id: UUID, status: str, db: AsyncSession) -> list[dict]:
     # Load the account WITH its group so we know the lot scaling
@@ -816,7 +896,15 @@ async def list_positions(account_id: UUID, user_id: UUID, status: str, db: Async
 
         if tick_data and pos_status == "open":
             tick = json.loads(tick_data)
-            current_price = float(tick["bid"]) if sv == "buy" else float(tick["ask"])
+            # Value the position at the user's CLOSE quote (mid re-spread with
+            # the user's own spread), NOT the raw broadcast bid/ask — otherwise
+            # the floating loss is bigger than what close_position realises and
+            # the P&L doesn't track the displayed price (client 2026-06-29).
+            _cb, _ca = await user_close_quote(
+                db, pos.instrument, user_id, pos.account_id,
+                account_row.account_group_id, tick,
+            )
+            current_price = float(_cb) if sv == "buy" else float(_ca)
             # Use the async P&L converter so cross pairs (NZDJPY etc.) get
             # the JPY→USD conversion via live USDJPY tick. The sync version
             # silently returns raw JPY for cross pairs which historically
@@ -1033,7 +1121,49 @@ async def close_position(position_id: UUID, req, user_id: UUID, db: AsyncSession
 
     tick = json.loads(tick_data)
     sv = side_val(pos.side)
-    close_price = Decimal(str(tick["bid"])) if sv == "buy" else Decimal(str(tick["ask"]))
+
+    # Re-derive the close bid/ask from the tick MID using the SAME per-scope
+    # spread the OPEN path used (master-pool override → resolve_spread_config
+    # for user / account-type / instrument / segment). Previously close used
+    # the raw broadcast tick, whose spread can differ from what was charged at
+    # open — that asymmetry is what made the spread look like it was taken
+    # twice. With open and close symmetric, the admin-configured spread is
+    # crossed exactly ONCE per round-trip (and it already shows in unrealised
+    # P&L the instant the trade opens), so nothing extra is taken at close.
+    # Client 2026-06-19. The mid still moves with the live market, so the
+    # spread sits around a fluctuating price as intended.
+    _raw_bid = Decimal(str(tick["bid"]))
+    _raw_ask = Decimal(str(tick["ask"]))
+    _mid_c = (_raw_bid + _raw_ask) / Decimal("2")
+    _pip_c = Decimal(str(pos.instrument.pip_size or "0.0001"))
+    _digits_c = int(pos.instrument.digits or 5)
+    c_bid, c_ask = _raw_bid, _raw_ask
+    _mult_c = await _live_spread_mult(pos.instrument.symbol)
+    try:
+        _master_c = (await db.execute(
+            select(MasterAccount).where(MasterAccount.account_id == account.id)
+        )).scalar_one_or_none()
+        if _master_c and _master_c.spread_markup_pips:
+            c_bid, c_ask = symmetric_quote_from_mid(
+                _mid_c, Decimal(str(_master_c.spread_markup_pips)) * _mult_c, "pips",
+                _pip_c, _digits_c, Decimal("0"),
+            )
+        else:
+            _sv_c, _st_c, _ = await resolve_spread_config(
+                db, pos.instrument, user_id=user_id,
+                account_group_id=account.account_group_id,
+            )
+            # Always re-spread from the mid; no config → 0 → close at mid (no
+            # market spread), symmetric with the open path (client 2026-06-29).
+            c_bid, c_ask = symmetric_quote_from_mid(
+                _mid_c, (_sv_c or Decimal("0")) * _mult_c, _st_c or "pips", _pip_c, _digits_c, Decimal("0"),
+            )
+    except Exception as _se:
+        logger.warning(
+            "Close-side spread resolution failed for %s (user=%s): %s",
+            pos.instrument.symbol, user_id, _se,
+        )
+    close_price = c_bid if sv == "buy" else c_ask
     contract_size = pos.instrument.contract_size if pos.instrument else Decimal("100000")
 
     # Use the SAME effective leverage formula as the open path so margin
@@ -1060,6 +1190,11 @@ async def close_position(position_id: UUID, req, user_id: UUID, db: AsyncSession
     _close_mult = Decimal(str(
         getattr(account.account_group, "lot_size_multiplier", None) or 1
     ))
+    # Defence in depth: the schema already enforces lots > 0, but never let a
+    # non-positive partial-close volume through here — a negative value would
+    # flip the P&L ratio (loss booked as profit) and grow the position.
+    if req.lots is not None and Decimal(str(req.lots)) <= 0:
+        raise HTTPException(status_code=400, detail="Close volume must be greater than zero")
     _close_req_scaled = (
         Decimal(str(req.lots)) * _close_mult if req.lots else None
     )
@@ -1142,6 +1277,7 @@ async def close_position(position_id: UUID, req, user_id: UUID, db: AsyncSession
 
         result_msg = f"Partial close: {close_lots} lots"
         result_profit = partial_profit
+        result_charges = partial_commission + partial_swap
     else:
         pos.status = "closed"
         pos.close_price = close_price
@@ -1176,6 +1312,24 @@ async def close_position(position_id: UUID, req, user_id: UUID, db: AsyncSession
 
         result_msg = "Position closed"
         result_profit = full_profit
+        result_charges = (pos.commission or Decimal("0")) + (pos.swap or Decimal("0"))
+
+    # NET P&L for what the trader SEES (close toast, notification, realtime
+    # push). The closed-positions list + portfolio already show
+    # profit - commission - swap, so the close screen must match (client
+    # 2026-06-23). The ledger Transaction below keeps the gross close amount —
+    # commission was charged at open and swap overnight as separate rows.
+    result_net = result_profit - result_charges
+
+    # Negative Balance Protection — a trader can never owe money. If a close
+    # (esp. a gapping/illiquid market) drops the balance below zero, the broker
+    # absorbs the residual and the balance resets to 0 (client 2026-06-19).
+    if account.balance < Decimal("0"):
+        logger.warning(
+            "NBP: absorbing %.2f negative balance on account %s after close",
+            float(-account.balance), getattr(account, "account_number", account.id),
+        )
+        account.balance = Decimal("0")
 
     account.equity = account.balance + (account.credit or Decimal("0"))
     account.free_margin = account.equity - (account.margin_used or Decimal("0"))
@@ -1249,8 +1403,8 @@ async def close_position(position_id: UUID, req, user_id: UUID, db: AsyncSession
     _pos_symbol = pos.instrument.symbol if pos.instrument else ""
     _pos_id = str(pos.id)
     _acct_id = str(account.id)
-    _profit_str = str(result_profit)
-    pnl_str = f"+${float(result_profit):.2f}" if result_profit >= 0 else f"-${abs(float(result_profit)):.2f}"
+    _profit_str = str(result_net)
+    pnl_str = f"+${float(result_net):.2f}" if result_net >= 0 else f"-${abs(float(result_net)):.2f}"
 
     async def _post_close_tasks():
         async with AsyncSessionLocal() as bg_db:
@@ -1300,7 +1454,11 @@ async def close_position(position_id: UUID, req, user_id: UUID, db: AsyncSession
     return {
         "message": result_msg,
         "close_price": float(close_price),
-        "profit": float(result_profit),
+        # NET P&L (profit - commission - swap) so the close screen matches the
+        # closed-positions list + portfolio. `gross_profit` kept for callers
+        # that need the raw price P&L.
+        "profit": float(result_net),
+        "gross_profit": float(result_profit),
         "lots_closed": float(close_lots),
         "remaining_lots": float(pos.lots) if is_partial else 0,
         "balance": float(account.balance),

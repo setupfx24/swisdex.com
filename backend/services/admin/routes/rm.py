@@ -123,6 +123,34 @@ async def reject_request(
     )
 
 
+@router.get("/manual-requests")
+async def list_manual_requests(
+    status: str | None = None,
+    admin: User = Depends(require_permission("rm.manage")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Trader-submitted 'Request to RM' deposit/withdraw requests (mail-to-RM)."""
+    return await rm_service.list_manual_requests(db=db, status_filter=status)
+
+
+class ManualStatusBody(BaseModel):
+    status: str
+
+
+@router.post("/manual-requests/{req_id}/status")
+async def set_manual_request_status(
+    req_id: uuid.UUID,
+    body: ManualStatusBody,
+    request: Request,
+    admin: User = Depends(require_permission("rm.manage")),
+    db: AsyncSession = Depends(get_db),
+):
+    return await rm_service.set_manual_request_status(
+        req_id=req_id, status=body.status, admin_id=admin.id,
+        ip_address=request.client.host if request.client else None, db=db,
+    )
+
+
 @router.get("/list")
 async def list_rms(
     admin: User = Depends(require_permission("rm.assign")),

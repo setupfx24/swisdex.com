@@ -57,6 +57,10 @@ def _user_to_out(u: User) -> dict:
         # so they can decide whether to reset / revoke sessions.
         "email_verified": bool(getattr(u, "email_verified", False)),
         "two_factor_enabled": bool(getattr(u, "two_factor_enabled", False)),
+        # Per-user bank deposit visibility (None = follow global toggle).
+        "bank_deposit_enabled": getattr(u, "bank_deposit_enabled", None),
+        # Whole-user promotional/pilot flag — excluded from real company figures.
+        "is_promotional": bool(getattr(u, "is_promotional", False)),
     }
 
 
@@ -76,7 +80,76 @@ def _account_to_out(a: TradingAccount) -> dict:
         "currency": a.currency,
         "is_demo": a.is_demo,
         "is_active": a.is_active,
+        "is_promotional": bool(getattr(a, "is_promotional", False)),
         "created_at": a.created_at,
+    }
+
+
+async def set_user_promotional(
+    user_id: uuid.UUID, is_promotional: bool, db: AsyncSession,
+) -> dict:
+    """Flag/unflag the WHOLE user as promotional (pilot)."""
+    user = (await db.execute(
+        select(User).where(User.id == user_id)
+    )).scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    user.is_promotional = bool(is_promotional)
+    await db.commit()
+    return {"user_id": str(user_id), "is_promotional": user.is_promotional}
+
+
+async def get_fr_referral_override(user_id: uuid.UUID, db: AsyncSession) -> dict:
+    """Current per-referrer FR referral-commission % override + the global
+    defaults it falls back to, for the admin user-detail override card."""
+    from packages.common.src.settings_store import get_float_setting
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    po = user.fr_referral_principal_pct_override
+    io = user.fr_referral_interest_pct_override
+    return {
+        "user_id": str(user_id),
+        "mode": (user.fr_referral_mode or "principal"),
+        "principal_pct_override": (float(po) if po is not None else None),
+        "interest_pct_override": (float(io) if io is not None else None),
+        "global_principal_pct": float(await get_float_setting("fr_referral_principal_pct", 0.0)),
+        "global_interest_pct": float(await get_float_setting("fr_referral_interest_pct", 0.0)),
+    }
+
+
+async def set_fr_referral_override(
+    user_id: uuid.UUID, principal_pct, interest_pct, db: AsyncSession,
+) -> dict:
+    """Set/clear a referrer's custom FR referral-commission %. Pass None on a
+    leg to CLEAR it (that leg then falls back to the global setting)."""
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    def _norm(v):
+        if v is None or v == "":
+            return None
+        d = Decimal(str(v))
+        if d < 0:
+            raise HTTPException(status_code=400, detail="Percentage cannot be negative")
+        if d > 100:
+            raise HTTPException(status_code=400, detail="Percentage cannot exceed 100")
+        return d
+
+    user.fr_referral_principal_pct_override = _norm(principal_pct)
+    user.fr_referral_interest_pct_override = _norm(interest_pct)
+    await db.commit()
+    return {
+        "user_id": str(user_id),
+        "principal_pct_override": (
+            float(user.fr_referral_principal_pct_override)
+            if user.fr_referral_principal_pct_override is not None else None
+        ),
+        "interest_pct_override": (
+            float(user.fr_referral_interest_pct_override)
+            if user.fr_referral_interest_pct_override is not None else None
+        ),
     }
 
 
@@ -280,6 +353,97 @@ async def get_user_deposits(user_id: uuid.UUID, db: AsyncSession) -> list[dict]:
     return out
 
 
+async def _apply_first_funding_bonus(user_row, amount: Decimal, db) -> Decimal:
+    """Welcome bonus for a user's FIRST funding done via admin add-fund —
+    mirrors the first-deposit bonus so an admin-credited first deposit earns the
+    same welcome bonus a real deposit would (client 2026-06-24). One-time: skips
+    if the user already has any bonus, any approved deposit, or has forfeited.
+    Bracket-walk kept in lockstep with wallet_service.compute_welcome_bonus.
+    Returns the bonus credited (0 if none)."""
+    from packages.common.src.settings_store import (
+        get_bool_setting, get_float_setting, get_system_setting,
+    )
+    from packages.common.src.models import Deposit as _Dep
+    if getattr(user_row, "bonus_forfeited_at", None) is not None:
+        return Decimal("0")
+    if not await get_bool_setting("welcome_bonus_enabled", False):
+        return Decimal("0")
+    prior_bonus = (await db.execute(
+        select(func.count()).select_from(Transaction).where(
+            Transaction.user_id == user_row.id, Transaction.type == "bonus",
+        )
+    )).scalar() or 0
+    if prior_bonus > 0:
+        return Decimal("0")
+    prior_dep = (await db.execute(
+        select(func.count()).select_from(_Dep).where(
+            _Dep.user_id == user_row.id,
+            _Dep.status.in_(["approved", "auto_approved"]),
+        )
+    )).scalar() or 0
+    if prior_dep > 0:
+        return Decimal("0")
+
+    raw = await get_system_setting("welcome_bonus_brackets", None)
+    brackets = raw if isinstance(raw, list) else []
+    if not brackets:
+        legacy = float(await get_float_setting("welcome_bonus_value", 0.0))
+        if legacy > 0:
+            brackets = [{
+                "min_deposit": 0, "max_deposit": None,
+                "type": (str(await get_system_setting("welcome_bonus_type", "percentage") or "percentage")).strip().lower(),
+                "value": legacy,
+                "cap_usd": float(await get_float_setting("welcome_bonus_cap_usd", 0.0)),
+            }]
+
+    bonus = Decimal("0")
+    label = ""
+    for row in brackets:
+        try:
+            min_d = Decimal(str(row.get("min_deposit") or 0))
+        except (TypeError, ValueError):
+            continue
+        mr = row.get("max_deposit")
+        try:
+            max_d = None if mr in (None, "") else Decimal(str(mr))
+        except (TypeError, ValueError):
+            max_d = None
+        if amount < min_d:
+            continue
+        if max_d is not None and amount > max_d:
+            continue
+        try:
+            value = Decimal(str(row.get("value") or 0))
+        except (TypeError, ValueError):
+            continue
+        if value <= 0:
+            continue
+        btype = (str(row.get("type") or "percentage")).strip().lower()
+        try:
+            cap = Decimal(str(row.get("cap_usd") or 0))
+        except (TypeError, ValueError):
+            cap = Decimal("0")
+        if btype == "percentage":
+            bonus = (amount * value / Decimal("100")).quantize(Decimal("0.01"))
+            label = f"Welcome bonus ({value}% of first fund-add)"
+        else:
+            bonus = value.quantize(Decimal("0.01"))
+            label = f"Welcome bonus (flat ${value})"
+        if cap > 0 and bonus > cap:
+            bonus = cap
+            label += f" — capped at ${cap}"
+        break
+
+    if bonus <= 0:
+        return Decimal("0")
+    user_row.main_wallet_bonus = (getattr(user_row, "main_wallet_bonus", None) or Decimal("0")) + bonus
+    db.add(Transaction(
+        user_id=user_row.id, account_id=None, type="bonus",
+        amount=bonus, balance_after=user_row.main_wallet_bonus, description=label,
+    ))
+    return bonus
+
+
 async def add_fund(
     user_id: uuid.UUID, body: FundRequest,
     admin_id: uuid.UUID, ip_address: str | None, db: AsyncSession,
@@ -298,8 +462,26 @@ async def add_fund(
     amt = Decimal(str(body.amount))
 
     if approval_request_id is None:
-        # First-pass: gate on amount thresholds. Either short-circuits with a
-        # 202 (approval required) or returns None to proceed.
+        # Anti-split guard (client 2026-06-23): if this user already received an
+        # admin fund-add in the last 24h, force dual approval on the NEXT one —
+        # even below the threshold — so an employee can't bypass the second
+        # sign-off by splitting one large credit into several small top-ups.
+        from datetime import datetime, timedelta, timezone
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+        recent = await db.execute(
+            select(Transaction.id).where(
+                Transaction.user_id == user_id,
+                Transaction.type == "adjustment",
+                Transaction.amount > 0,
+                Transaction.created_by.isnot(None),
+                Transaction.created_at >= cutoff,
+            ).limit(1)
+        )
+        force_dual = recent.first() is not None
+
+        # First-pass: gate on amount thresholds (or force dual approval if the
+        # 24h guard above tripped). Either short-circuits with a 202 (approval
+        # required) or returns None to proceed.
         await request_or_execute(
             db,
             action="add_fund",
@@ -308,6 +490,7 @@ async def add_fund(
             amount=amt,
             payload={"description": body.description, "source": "main_wallet"},
             requested_by=admin_id,
+            always=force_dual,
         )
     else:
         # Second-pass: confirm the approval row matches what we're about to do.
@@ -351,6 +534,11 @@ async def add_fund(
     )
     db.add(txn)
 
+    # First-funding welcome bonus (client 2026-06-24): an admin-credited FIRST
+    # deposit earns the same welcome bonus a real first deposit would. No-op
+    # unless welcome_bonus_enabled is on AND this is the user's first funding.
+    bonus_credited = await _apply_first_funding_bonus(user_row, amt, db)
+
     await write_audit_log(
         db, admin_id, "add_fund", "user", user_id,
         # Money columns stored as strings to preserve full Decimal precision
@@ -364,8 +552,9 @@ async def add_fund(
         user_id,
         title="Funds Added",
         message=(
-            f"${float(body.amount):,.2f} has been added to your main wallet. "
-            "You can now transfer it to your trading account from the Wallet page."
+            f"${float(body.amount):,.2f} has been added to your main wallet."
+            + (f" Plus a ${float(bonus_credited):,.2f} welcome bonus!" if bonus_credited > 0 else "")
+            + " You can now transfer it to your trading account from the Wallet page."
         ),
         notif_type="deposit",
         action_url="/wallet",
@@ -968,6 +1157,27 @@ async def delete_user(
         "DELETE FROM employee_tasks WHERE assigned_to = :uid OR assigned_by = :uid",
         "UPDATE employee_custom_roles SET created_by = NULL WHERE created_by = :uid",
         "UPDATE admin_notifications SET read_by = NULL WHERE read_by = :uid",
+        # Per-user pricing overrides (admin sets these on master traders / VIPs).
+        # spread_configs.user_id / swap_configs.user_id are RESTRICT FKs, so an
+        # uncleaned row blocks the final user delete → the 500 on master users.
+        "DELETE FROM spread_configs WHERE user_id = :uid",
+        "DELETE FROM swap_configs WHERE user_id = :uid",
+        # Social / sharing + rewards rows that FK users.id without CASCADE.
+        "DELETE FROM shared_trades WHERE user_id = :uid",
+        "DELETE FROM social_follows WHERE follower_id = :uid OR following_id = :uid",
+        "DELETE FROM master_followers WHERE follower_user_id = :uid",
+        # Bonuses / pool memberships an "old" (active) user accumulated that
+        # also FK users.id without CASCADE (client 2026-06-20: long-standing
+        # users still failed to delete). Each is a no-op if absent.
+        "DELETE FROM user_bonuses WHERE user_id = :uid",
+        "DELETE FROM master_accounts WHERE user_id = :uid",
+        "DELETE FROM ticket_messages WHERE sender_id = :uid",
+        # Personal bank-deposit requests (migration 0082). user_id is a RESTRICT
+        # FK so an uncleaned row blocks the final user delete (client 2026-06-29:
+        # "deposit_requests_user_id_fkey" violation). approved_by points at the
+        # admin who responded — NULL it on rows this user reviewed for others.
+        "DELETE FROM deposit_requests WHERE user_id = :uid",
+        "UPDATE deposit_requests SET approved_by = NULL WHERE approved_by = :uid",
     ]
     for _sql in _optional:
         try:
@@ -989,10 +1199,15 @@ async def delete_user(
             ip_address=ip_address,
         )
         await db.commit()
-    except (IntegrityError, DBAPIError) as e:
-        # A table we don't yet clean up still references this user. Surface
-        # WHICH constraint so it's a clear, fixable message in the admin UI
-        # instead of a silent "Internal server error".
+    except HTTPException:
+        raise
+    except Exception as e:
+        # A table we don't yet clean up still references this user (or any
+        # other DB error). Surface WHAT blocked it so it's a clear, fixable
+        # message in the admin UI instead of a silent "Internal server error"
+        # — client 2026-06-20: never 500 the delete. Broadened from the
+        # IntegrityError/DBAPIError-only catch so an asyncpg/ProgrammingError
+        # from an old user's extra rows can't escape as a 500.
         await db.rollback()
         orig = getattr(e, "orig", e)
         raise HTTPException(
@@ -1065,9 +1280,14 @@ async def trigger_password_reset(
             "Reset token created; SMTP unconfigured — check server logs"
         ),
         "sent": bool(sent),
-        # Only surface the link in non-prod; prod admins must rely on
-        # the email so the token doesn't leak to the audit log UI.
-        "reset_link": link if settings.ENVIRONMENT != "production" else None,
+        # Only surface the link in a genuine dev environment; prod admins must
+        # rely on the email so the account-takeover token never leaks in-band.
+        # Use the SAME canonical dev set as config.py (an `!= "production"`
+        # test would still expose the link under ENVIRONMENT=staging/prod/etc).
+        "reset_link": (
+            link if settings.ENVIRONMENT.lower() in ("development", "dev", "local", "test")
+            else None
+        ),
     }
 
 

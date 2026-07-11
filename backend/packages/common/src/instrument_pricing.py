@@ -33,6 +33,23 @@ def _acct_grp_order(model):
     return model.account_group_id.is_(None).asc()
 
 
+# ─── Global spread boost (admin Spread Config page) ─────────────────
+# When system setting spread_boost_enabled is true, EVERY resolved spread
+# (default / segment / instrument / per-user, fills + display + stream)
+# scales by (1 + spread_boost_percent/100). Turning it off restores the
+# stored rule values untouched — rules are never mutated.
+async def spread_boost_multiplier() -> Decimal:
+    try:
+        from .settings_store import get_bool_setting, get_float_setting
+        if await get_bool_setting("spread_boost_enabled", False):
+            pct = await get_float_setting("spread_boost_percent", 0.0)
+            if pct:
+                return Decimal("1") + Decimal(str(pct)) / Decimal("100")
+    except Exception:
+        pass
+    return Decimal("1")
+
+
 # ─── XP-tier brokerage discount ─────────────────────────────────────
 # Per XP_Reward_mechanism slide 7: higher XP levels reduce brokerage. We
 # apply a 1% discount per level above L1, capped at 9% at L10. Modest by
@@ -98,10 +115,11 @@ async def resolve_spread_config(
     pre-0049 behaviour (wildcards only).
     """
     pimp = await _instrument_config_price_impact(db, instrument.id)
+    boost = await spread_boost_multiplier()
 
     def _to_tuple(row: SpreadConfig) -> Tuple[Decimal, str, Decimal]:
         return (
-            Decimal(str(row.value or 0)),
+            Decimal(str(row.value or 0)) * boost,
             (row.spread_type or "pips").lower(),
             pimp,
         )

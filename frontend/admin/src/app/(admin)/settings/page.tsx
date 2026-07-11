@@ -19,6 +19,13 @@ interface Settings {
   // withdrawal submission. 0 = no minimum.
   min_deposit_amount_usd: number;
   min_withdrawal_amount_usd: number;
+  // Auto crypto withdrawal (NOWPayments payout). Crypto withdrawals at/below
+  // the max are paid out automatically; larger ones need admin approval.
+  crypto_auto_withdrawal_enabled: boolean;
+  crypto_auto_withdrawal_max_usd: number;
+  dual_approval_threshold_usd: number;
+  deposit_dual_approval_min_usd: number;
+  withdrawal_dual_approval_min_usd: number;
   referral_commission_amount_usd: number;
   referral_qualifying_trades: number;
   // IB commission gates (mirror of the referral gates above).
@@ -33,6 +40,8 @@ interface Settings {
   // Show/hide the PAMM and MAM (copy-trading) products in the trader app.
   pamm_enabled: boolean;
   mam_enabled: boolean;
+  // Allow Trade Insurance on PAMM/MAM pool + managed accounts.
+  pamm_mam_insurance_enabled: boolean;
   // Admin-controlled payment-method tabs in the trader wallet.
   // Crypto (NOWPayments) is always on; these two toggle the
   // remaining tabs in real time via /wallet/payment-methods.
@@ -61,6 +70,11 @@ const DEFAULT_SETTINGS: Settings = {
   ib_min_deposit_usd: 100,
   min_deposit_amount_usd: 50,
   min_withdrawal_amount_usd: 70,
+  crypto_auto_withdrawal_enabled: false,
+  crypto_auto_withdrawal_max_usd: 0,
+  dual_approval_threshold_usd: 1000,
+  deposit_dual_approval_min_usd: 0,
+  withdrawal_dual_approval_min_usd: 0,
   referral_commission_amount_usd: 5,
   referral_qualifying_trades: 3,
   ib_commission_requires_kyc: true,
@@ -70,6 +84,7 @@ const DEFAULT_SETTINGS: Settings = {
   allow_deposits: true,
   allow_withdrawals: true,
   pamm_enabled: true,
+  pamm_mam_insurance_enabled: false,
   mam_enabled: true,
   'wallet.manual_enabled': true,
   'wallet.p2p_enabled': false,
@@ -104,6 +119,11 @@ function rowsToSettings(rows: SystemSettingRow[]): Settings {
     ib_min_deposit_usd: num('ib_min_deposit_usd', DEFAULT_SETTINGS.ib_min_deposit_usd),
     min_deposit_amount_usd: num('min_deposit_amount_usd', DEFAULT_SETTINGS.min_deposit_amount_usd),
     min_withdrawal_amount_usd: num('min_withdrawal_amount_usd', DEFAULT_SETTINGS.min_withdrawal_amount_usd),
+    crypto_auto_withdrawal_enabled: bool('crypto_auto_withdrawal_enabled', DEFAULT_SETTINGS.crypto_auto_withdrawal_enabled),
+    crypto_auto_withdrawal_max_usd: num('crypto_auto_withdrawal_max_usd', DEFAULT_SETTINGS.crypto_auto_withdrawal_max_usd),
+    dual_approval_threshold_usd: num('dual_approval_threshold_usd', DEFAULT_SETTINGS.dual_approval_threshold_usd),
+    deposit_dual_approval_min_usd: num('deposit_dual_approval_min_usd', DEFAULT_SETTINGS.deposit_dual_approval_min_usd),
+    withdrawal_dual_approval_min_usd: num('withdrawal_dual_approval_min_usd', DEFAULT_SETTINGS.withdrawal_dual_approval_min_usd),
     referral_commission_amount_usd: num(
       'referral_commission_amount_usd',
       DEFAULT_SETTINGS.referral_commission_amount_usd as number,
@@ -126,6 +146,7 @@ function rowsToSettings(rows: SystemSettingRow[]): Settings {
     allow_withdrawals: bool('allow_withdrawals', DEFAULT_SETTINGS.allow_withdrawals),
     pamm_enabled: bool('pamm_enabled', DEFAULT_SETTINGS.pamm_enabled),
     mam_enabled: bool('mam_enabled', DEFAULT_SETTINGS.mam_enabled),
+    pamm_mam_insurance_enabled: bool('pamm_mam_insurance_enabled', DEFAULT_SETTINGS.pamm_mam_insurance_enabled),
     'wallet.manual_enabled': bool('wallet.manual_enabled', DEFAULT_SETTINGS['wallet.manual_enabled']),
     'wallet.p2p_enabled': bool('wallet.p2p_enabled', DEFAULT_SETTINGS['wallet.p2p_enabled']),
     'wallet.rm_email': (() => {
@@ -147,6 +168,11 @@ function settingsToPayload(s: Settings): Record<string, unknown> {
     ib_min_deposit_usd: s.ib_min_deposit_usd,
     min_deposit_amount_usd: s.min_deposit_amount_usd,
     min_withdrawal_amount_usd: s.min_withdrawal_amount_usd,
+    crypto_auto_withdrawal_enabled: s.crypto_auto_withdrawal_enabled,
+    crypto_auto_withdrawal_max_usd: s.crypto_auto_withdrawal_max_usd,
+    dual_approval_threshold_usd: s.dual_approval_threshold_usd,
+    deposit_dual_approval_min_usd: s.deposit_dual_approval_min_usd,
+    withdrawal_dual_approval_min_usd: s.withdrawal_dual_approval_min_usd,
     // Fallback flat USD bounty — used only when referral_tiers
     // (the by-active-referral-count ladder, editable at /config/referral-tiers,
     // independent of IB) has no matching tier for the referrer's position.
@@ -159,6 +185,7 @@ function settingsToPayload(s: Settings): Record<string, unknown> {
     allow_deposits: s.allow_deposits,
     allow_withdrawals: s.allow_withdrawals,
     pamm_enabled: s.pamm_enabled,
+    pamm_mam_insurance_enabled: s.pamm_mam_insurance_enabled,
     mam_enabled: s.mam_enabled,
     'wallet.manual_enabled': s['wallet.manual_enabled'],
     'wallet.p2p_enabled': s['wallet.p2p_enabled'],
@@ -350,6 +377,7 @@ export default function SettingsPage() {
                     { key: 'allow_withdrawals', label: 'Allow Withdrawals', desc: 'Enable or disable withdrawal requests' },
                     { key: 'pamm_enabled', label: 'Show PAMM to customers', desc: 'Off = hide the PAMM product from the trader app' },
                     { key: 'mam_enabled', label: 'Show MAM / Copy Trading to customers', desc: 'Off = hide MAM / copy-trading from the trader app' },
+                    { key: 'pamm_mam_insurance_enabled', label: 'Trade Insurance on PAMM / MAM accounts', desc: 'Off = PAMM/MAM pool + managed accounts cannot buy Trade Insurance' },
                     // Per-method tabs in the trader wallet. Crypto (NOWPayments)
                     // is always on; these two toggle the Manual + P2P tabs in
                     // real time. Gateway also hard-rejects API calls on the
@@ -438,6 +466,100 @@ export default function SettingsPage() {
                       min="0"
                       value={settings.min_withdrawal_amount_usd}
                       onChange={(e) => updateNum('min_withdrawal_amount_usd', e.target.value)}
+                      className="w-28 text-xs py-1.5 px-2 bg-bg-input border border-border-primary rounded-md font-mono tabular-nums text-right"
+                    />
+                    <span className="text-xxs text-text-tertiary w-8">USD</span>
+                  </div>
+                </div>
+
+                {/* Auto crypto withdrawal (NOWPayments payout) */}
+                <div className="flex items-center justify-between gap-4 p-3 rounded-md border border-border-primary">
+                  <div>
+                    <p className="text-xs font-medium text-text-primary">Auto Crypto Withdrawal (NOWPayments)</p>
+                    <p className="text-xxs text-text-tertiary mt-0.5">Send crypto withdrawals automatically via NOWPayments. Needs NOWPayments payout credentials + whitelisting/2FA disabled on their dashboard.</p>
+                  </div>
+                  <button
+                    onClick={() => updateBool('crypto_auto_withdrawal_enabled', !settings.crypto_auto_withdrawal_enabled)}
+                    className={cn('relative w-9 h-5 rounded-full transition-fast shrink-0', settings.crypto_auto_withdrawal_enabled ? 'bg-success' : 'bg-bg-tertiary border border-border-primary')}
+                  >
+                    <span className={cn('absolute top-0.5 w-4 h-4 rounded-full bg-white transition-fast shadow-sm', settings.crypto_auto_withdrawal_enabled ? 'left-[18px]' : 'left-0.5')} />
+                  </button>
+                </div>
+                <div className="flex flex-wrap items-center justify-between gap-4">
+                  <div className="min-w-0 flex-1">
+                    <label className="text-xs text-text-secondary block">Auto-Withdrawal Max (USD)</label>
+                    <p className="text-xxs text-text-tertiary mt-0.5">Crypto withdrawals at or below this amount are paid out automatically; larger ones need admin approval. 0 = nothing auto.</p>
+                  </div>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <span className="text-xxs text-text-tertiary">$</span>
+                    <input
+                      type="number"
+                      step="1"
+                      min="0"
+                      value={settings.crypto_auto_withdrawal_max_usd}
+                      onChange={(e) => updateNum('crypto_auto_withdrawal_max_usd', e.target.value)}
+                      className="w-28 text-xs py-1.5 px-2 bg-bg-input border border-border-primary rounded-md font-mono tabular-nums text-right"
+                    />
+                    <span className="text-xxs text-text-tertiary w-8">USD</span>
+                  </div>
+                </div>
+
+                {/* Dual-approval threshold (client 2026-06-23: make the $1000
+                    second-sign-off limit editable). */}
+                <div className="flex flex-wrap items-center justify-between gap-4">
+                  <div className="min-w-0 flex-1">
+                    <label className="text-xs text-text-secondary block">Dual-Approval Threshold</label>
+                    <p className="text-xxs text-text-tertiary mt-0.5">Admin fund add/deduct at or above this amount needs a second admin sign-off. (A repeat fund-add to the same user within 24h always needs approval, regardless of this limit.)</p>
+                  </div>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <span className="text-xxs text-text-tertiary">$</span>
+                    <input
+                      type="number"
+                      step="1"
+                      min="0"
+                      value={settings.dual_approval_threshold_usd}
+                      onChange={(e) => updateNum('dual_approval_threshold_usd', e.target.value)}
+                      className="w-28 text-xs py-1.5 px-2 bg-bg-input border border-border-primary rounded-md font-mono tabular-nums text-right"
+                    />
+                    <span className="text-xxs text-text-tertiary w-8">USD</span>
+                  </div>
+                </div>
+
+                {/* Deposit dual-approval limit (client 2026-07-08): user
+                    deposits at/above this need a second super-admin sign-off. */}
+                <div className="flex flex-wrap items-center justify-between gap-4">
+                  <div className="min-w-0 flex-1">
+                    <label className="text-xs text-text-secondary block">Deposit Dual-Approval Limit</label>
+                    <p className="text-xxs text-text-tertiary mt-0.5">A user deposit at or above this amount needs a second super-admin sign-off in Approvals before it's credited. 0 = off (no limit).</p>
+                  </div>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <span className="text-xxs text-text-tertiary">$</span>
+                    <input
+                      type="number"
+                      step="1"
+                      min="0"
+                      value={settings.deposit_dual_approval_min_usd}
+                      onChange={(e) => updateNum('deposit_dual_approval_min_usd', e.target.value)}
+                      className="w-28 text-xs py-1.5 px-2 bg-bg-input border border-border-primary rounded-md font-mono tabular-nums text-right"
+                    />
+                    <span className="text-xxs text-text-tertiary w-8">USD</span>
+                  </div>
+                </div>
+
+                {/* Withdrawal dual-approval limit. */}
+                <div className="flex flex-wrap items-center justify-between gap-4">
+                  <div className="min-w-0 flex-1">
+                    <label className="text-xs text-text-secondary block">Withdrawal Dual-Approval Limit</label>
+                    <p className="text-xxs text-text-tertiary mt-0.5">A user withdrawal at or above this amount needs a second super-admin sign-off in Approvals before it's paid out. 0 = off (no limit).</p>
+                  </div>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <span className="text-xxs text-text-tertiary">$</span>
+                    <input
+                      type="number"
+                      step="1"
+                      min="0"
+                      value={settings.withdrawal_dual_approval_min_usd}
+                      onChange={(e) => updateNum('withdrawal_dual_approval_min_usd', e.target.value)}
                       className="w-28 text-xs py-1.5 px-2 bg-bg-input border border-border-primary rounded-md font-mono tabular-nums text-right"
                     />
                     <span className="text-xxs text-text-tertiary w-8">USD</span>

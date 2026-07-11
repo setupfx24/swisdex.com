@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from packages.common.src.database import AsyncSessionLocal
 from packages.common.src.models import (
     Position, PositionStatus, TradingAccount, Instrument,
-    OrderSide, SwapConfig, Notification, Transaction, User,
+    OrderSide, SwapConfig, Notification, Transaction, User, TradeHistory,
 )
 from packages.common.src.redis_client import redis_client, PriceChannel
 from packages.common.src.config import get_settings
@@ -143,6 +143,12 @@ class RiskEngine:
                             )
                             unrealized_pnl += pnl
 
+                        # Negative Balance Protection (client 2026-06-20): a
+                        # trading account's realized balance must never be
+                        # negative. Clamp here so any account that drifted below
+                        # zero (e.g. old swap charges) self-heals every tick.
+                        if account.balance is not None and account.balance < 0:
+                            account.balance = Decimal("0")
                         equity = account.balance + account.credit + unrealized_pnl
                         margin_level = (equity / account.margin_used * 100) if account.margin_used > 0 else Decimal("9999")
 
@@ -244,6 +250,26 @@ class RiskEngine:
             pos.profit = profit
             pos.closed_at = datetime.now(timezone.utc)
 
+            # Record the closed trade so it shows in Closed Positions / history —
+            # mirrors the manual-close path in gateway trading_service. Without
+            # this, a stop-out silently vanished from the trader's history
+            # (client 2026-07-02).
+            db.add(TradeHistory(
+                position_id=pos.id,
+                account_id=pos.account_id,
+                instrument_id=pos.instrument_id,
+                side=pos.side,
+                lots=pos.lots,
+                open_price=pos.open_price,
+                close_price=close_price,
+                swap=pos.swap or Decimal("0"),
+                commission=pos.commission or Decimal("0"),
+                profit=profit,
+                close_reason="stop_out",
+                opened_at=pos.created_at,
+                closed_at=pos.closed_at,
+            ))
+
             account.balance += profit
             # Release margin in account currency to mirror the USD-converted
             # value used on open. Otherwise stop-outs under-release on JPY
@@ -300,6 +326,20 @@ class RiskEngine:
             _so = await _gfs("stop_out_level", settings.STOP_OUT_LEVEL)
             if margin_level > Decimal(str(_so)):
                 break
+
+        # ── Negative Balance Protection ──────────────────────────────────
+        # After liquidating, the broker absorbs any residual loss — a trader can
+        # NEVER owe money / go below zero (client 2026-06-19; standard at
+        # regulated brokers). A fast/gapping market can close the last position
+        # below break-even, so clamp a negative balance back to 0.
+        if account.balance < Decimal("0"):
+            logger.warning(
+                "NBP: absorbing %.2f negative balance on account %s after stop-out",
+                float(-account.balance), account.account_number,
+            )
+            account.balance = Decimal("0")
+        account.equity = account.balance + (account.credit or Decimal("0"))
+        account.free_margin = account.equity - (account.margin_used or Decimal("0"))
 
         # After the stop-out loop ends — email the user a summary. Skipped on
         # demo accounts, and on the no-op case where nothing was actually

@@ -91,6 +91,31 @@ async def approve(
         # status flip + mark_executed).
         return {"message": "Approved and executed", "request_id": str(request_id), "result": result}
 
+    # Fund add/deduct ALSO execute on the second sign-off (client 2026-06-23):
+    # previously the requesting admin had to re-invoke the original endpoint
+    # with ?approval_request_id=, which the UI never did — so the money never
+    # moved even after both approvals. Execute it here, like deposit/withdrawal.
+    if action in ("add_fund", "deduct_fund"):
+        from services import user_service
+        from packages.common.src.admin_schemas import FundRequest
+        tid = uuid.UUID(str(rec["target_id"]))
+        payload = rec["payload"] or {}
+        body = FundRequest(
+            account_id=payload.get("account_id"),
+            amount=float(payload.get("amount") or 0),
+            description=payload.get("description"),
+            source=payload.get("source"),
+        )
+        if action == "add_fund":
+            result = await user_service.add_fund(
+                tid, body, admin.id, ip, db, approval_request_id=request_id,
+            )
+        else:
+            result = await user_service.deduct_fund(
+                tid, body, admin.id, ip, db, approval_request_id=request_id,
+            )
+        return {"message": "Approved and executed", "request_id": str(request_id), "result": result}
+
     await write_audit_log(
         db, admin.id, "approval_grant", "admin_approval_request", request_id,
         new_values={"action": rec["action"], "target_id": str(rec["target_id"])},

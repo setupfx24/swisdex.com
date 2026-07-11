@@ -152,6 +152,10 @@ export const useAuthStore = create<AuthState>()((set) => ({
       }
       api.clearToken();
       useNotificationStore.getState().reset();
+      // Reset the once-per-session KYC nudge so it pops again on the NEXT
+      // login if the user still hasn't completed KYC (client 2026-06-23:
+      // "tab tab aana chahiye" — every login until KYC is done).
+      if (typeof window !== 'undefined') sessionStorage.removeItem('kyc_prompt_shown');
       set({ user: null, token: null, isAuthenticated: false });
     })();
   },

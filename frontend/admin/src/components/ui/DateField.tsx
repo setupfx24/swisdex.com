@@ -146,11 +146,14 @@ export default function DateField({
             ))}
           </div>
 
-          {/* Day grid — outside-month days are clearly muted so they never
-              blend with the current month. */}
+          {/* Day grid — show ONLY the current month's days. Leading/trailing
+              cells from the adjacent months are rendered blank so the calendar
+              never shows previous- or next-month dates (client 2026-07-06). */}
           <div className="grid grid-cols-7 gap-0.5">
             {days.map((d, i) => {
-              const outside = !isSameMonth(d, viewMonth);
+              if (!isSameMonth(d, viewMonth)) {
+                return <div key={i} className="h-7 w-7" aria-hidden />;
+              }
               const sel = selected != null && isSameDay(d, selected);
               const isToday = isSameDay(d, today);
               const disabled = isDisabled(d);
@@ -164,9 +167,7 @@ export default function DateField({
                     'h-7 w-7 rounded text-[11px] tabular-nums flex items-center justify-center transition-colors',
                     sel
                       ? 'bg-buy text-white font-semibold'
-                      : outside
-                        ? 'text-text-tertiary/40 hover:bg-bg-hover'
-                        : 'text-text-secondary hover:bg-bg-hover',
+                      : 'text-text-secondary hover:bg-bg-hover',
                     isToday && !sel ? 'ring-1 ring-buy/50' : '',
                     disabled ? 'opacity-30 cursor-not-allowed hover:bg-transparent' : '',
                   )}

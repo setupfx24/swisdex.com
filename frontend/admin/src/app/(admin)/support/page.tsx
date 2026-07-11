@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { adminApi } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { Loader2, RefreshCw, Send, ArrowLeft, MessageSquare, Lock } from 'lucide-react';
@@ -83,6 +83,19 @@ export default function SupportPage() {
 
   useEffect(() => { fetchTickets(); }, [fetchTickets]);
 
+  // Deep-link from the dashboard (/support?ticket=<id>) — auto-open that ticket
+  // so the admin lands straight on the reply box (client 2026-06-26).
+  const autoOpenedRef = useRef(false);
+  useEffect(() => {
+    if (autoOpenedRef.current || tickets.length === 0 || typeof window === 'undefined') return;
+    const id = new URLSearchParams(window.location.search).get('ticket');
+    if (!id) return;
+    autoOpenedRef.current = true;
+    const t = tickets.find((x) => x.id === id) ?? ({ id } as Ticket);
+    void openTicket(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tickets]);
+
   useEffect(() => {
     adminApi.get<{ employees: Employee[] }>('/employees').then((r) => setEmployees(r.employees || [])).catch(() => {});
   }, []);
@@ -119,8 +132,18 @@ export default function SupportPage() {
   const handleAssign = async (ticketId: string, adminId: string) => {
     try {
       await adminApi.put(`/support/tickets/${ticketId}/assign`, { admin_id: adminId });
-      toast.success('Ticket assigned');
+      toast.success(adminId ? 'Ticket assigned' : 'Ticket unassigned');
       fetchTickets();
+      // Reflect the change immediately in the open ticket (the dropdown binds
+      // to selectedTicket.assigned_to) instead of waiting for a re-open.
+      if (selectedTicket?.id === ticketId) {
+        const emp = employees.find((e) => e.user_id === adminId);
+        setSelectedTicket((prev) => prev ? {
+          ...prev,
+          assigned_to: adminId || undefined,
+          assigned_name: emp?.full_name,
+        } : null);
+      }
     } catch (e: any) {
       toast.error(e.message || 'Failed to assign');
     }
@@ -205,6 +228,21 @@ export default function SupportPage() {
                       {msg.is_internal_note && <span className="text-xxs text-warning">(Internal)</span>}
                     </div>
                     <p className="text-xs text-text-secondary whitespace-pre-wrap">{msg.message}</p>
+                    {Array.isArray((msg as { attachments?: { name?: string; type?: string; data?: string }[] }).attachments) && (
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {((msg as { attachments?: { name?: string; type?: string; data?: string }[] }).attachments || []).map((a, i) => (
+                          a?.data ? (
+                            (a.type || '').startsWith('image/') ? (
+                              <a key={i} href={a.data} target="_blank" rel="noreferrer" title={a.name}>
+                                <img src={a.data} alt={a.name || 'attachment'} className="max-h-32 rounded border border-border-primary" />
+                              </a>
+                            ) : (
+                              <a key={i} href={a.data} download={a.name || 'attachment'} className="text-xxs text-buy underline">{a.name || 'Download attachment'}</a>
+                            )
+                          ) : null
+                        ))}
+                      </div>
+                    )}
                   </div>
                 ))
               )}

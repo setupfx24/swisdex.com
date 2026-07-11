@@ -22,6 +22,26 @@ from ..services import wallet_service
 
 router = APIRouter()
 
+
+async def _manual_enabled_for_user(user_id, db: AsyncSession) -> bool:
+    """Effective bank/manual-deposit availability for ONE user: the global
+    `wallet.manual_enabled` toggle, overridden by the per-user
+    `users.bank_deposit_enabled` (NULL = follow global). The deposit-submit
+    endpoints MUST use this — not the bare global — so a specifically-enabled
+    user can still bank-deposit when the global rail is off (client 2026-06-26).
+    """
+    from packages.common.src.settings_store import get_bool_setting
+    from packages.common.src.models import User
+    from sqlalchemy import select
+    manual = await get_bool_setting("wallet.manual_enabled", True)
+    row = (await db.execute(
+        select(User.bank_deposit_enabled).where(User.id == user_id)
+    )).first()
+    if row and row[0] is not None:
+        manual = bool(row[0])
+    return manual
+
+
 # Per-user throttle on money-out endpoints (security review). A
 # legitimate trader withdraws a handful of times a day; an
 # account-takeover or scripted-abuse attempt hammers it. 10 attempts /
@@ -59,8 +79,7 @@ async def create_manual_deposit(
     # /payment-methods endpoint exposes also hard-rejects API calls
     # when manual is disabled.
     from fastapi import HTTPException
-    from packages.common.src.settings_store import get_bool_setting
-    if not await get_bool_setting("wallet.manual_enabled", True):
+    if not await _manual_enabled_for_user(current_user["user_id"], db):
         raise HTTPException(
             status_code=403,
             detail="Manual deposits are currently disabled. Please use the crypto channel.",
@@ -164,12 +183,11 @@ async def create_manual_withdrawal(
 ):
     """Manual payout: user provides UPI ID and/or a QR image for finance to pay out (main wallet)."""
     from fastapi import HTTPException
-    from packages.common.src.settings_store import get_bool_setting
     await check_rate_limit(
         "withdraw", str(current_user["user_id"]),
         max_requests=WITHDRAW_MAX_PER_WINDOW, window_sec=WITHDRAW_WINDOW_SEC,
     )
-    if not await get_bool_setting("wallet.manual_enabled", True):
+    if not await _manual_enabled_for_user(current_user["user_id"], db):
         raise HTTPException(
             status_code=403,
             detail="Manual withdrawals are currently disabled. Please use the crypto channel.",
@@ -438,6 +456,22 @@ async def create_rm_request(
             f"(phone {phone})"
         ),
     ))
+    # Persist the request so admin can see it in the panel (not just the RM's
+    # inbox) — the RM Requests → Manual tab reads this table (migration 0093).
+    from packages.common.src.models import RmManualRequest
+    db.add(RmManualRequest(
+        user_id=user_row.id,
+        side=side,
+        amount=amount,
+        method=(pay_method or None),
+        phone=phone,
+        payout_details=(
+            body.payout_details.strip()
+            if (side == "withdraw" and body.payout_details) else None
+        ),
+        note=(body.note.strip() if body.note else None),
+        status="new",
+    ))
     await db.commit()
 
     return {
@@ -450,7 +484,10 @@ async def create_rm_request(
 
 
 @router.get("/payment-methods")
-async def get_payment_methods():
+async def get_payment_methods(
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     # Public flags driving which tabs the trader UI shows. Crypto
     # (NOWPayments) is always enabled — it's the primary funding rail
     # and shouldn't be admin-toggleable. Manual (bank/UPI) and P2P are
@@ -463,11 +500,109 @@ async def get_payment_methods():
     # Defaults: manual = True (preserves existing behaviour), p2p = False
     # (P2P marketplace is still being onboarded — admin opts in when ready).
     from packages.common.src.settings_store import get_bool_setting
+    from packages.common.src.models import User
+    from sqlalchemy import select
+    manual = await get_bool_setting("wallet.manual_enabled", True)
+    # Per-user override (client 2026-06-23): admin can show the bank deposit
+    # option to a SPECIFIC client even when the global manual rail is off (or
+    # hide it for a specific client when it's globally on).
+    row = (await db.execute(
+        select(User.bank_deposit_enabled).where(User.id == current_user["user_id"])
+    )).first()
+    if row and row[0] is not None:
+        manual = bool(row[0])
     return {
         "crypto": True,
-        "manual": await get_bool_setting("wallet.manual_enabled", True),
+        "manual": manual,
         "p2p": await get_bool_setting("wallet.p2p_enabled", False),
     }
+
+
+class DepositDetailsRequest(BaseModel):
+    amount: Decimal
+
+
+@router.post("/deposit/request")
+async def request_deposit_details(
+    body: DepositDetailsRequest,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """User asks an admin for personal payment details (QR / bank / UPI) for a
+    bank deposit. Admin approves it and the details surface back here."""
+    from ..services import deposit_request_service
+    return await deposit_request_service.create_request(
+        current_user["user_id"], body.amount, db,
+    )
+
+
+@router.get("/deposit/my-requests")
+async def my_deposit_requests(
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """The user's deposit-details requests with the admin's reply once approved."""
+    from ..services import deposit_request_service
+    return await deposit_request_service.list_my_requests(current_user["user_id"], db)
+
+
+@router.get("/deposit/methods")
+async def deposit_methods(
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Admin-configured deposit methods (QR / UPI / bank / notice / declaration /
+    min-max) that drive the XM-style deposit flow."""
+    from ..services import payment_method_service
+    return await payment_method_service.list_methods(db)
+
+
+@router.get("/deposit/fx-quote")
+async def deposit_fx_quote(
+    currency: str = Query("INR"),
+    amount: Decimal | None = Query(None),
+    method_id: UUID | None = Query(None),
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """<currency>->USD rate + the USD a local amount will credit (shown as the
+    user types). If `method_id` has an admin-fixed rate, it's used over the API."""
+    from ..services import payment_method_service
+    return await payment_method_service.quote(currency, amount, db, method_id=method_id)
+
+
+@router.get("/withdraw/fx-quote")
+async def withdraw_fx_quote(
+    amount: Decimal | None = Query(None),
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """For a bank withdrawal entered in USD, the local currency the user will
+    receive (≈), at the admin-fixed withdrawal rate when set."""
+    from ..services import payment_method_service
+    return await payment_method_service.withdrawal_quote(amount, db)
+
+
+class MethodDepositRequest(BaseModel):
+    method_id: UUID
+    pay_amount: Decimal
+    utr: str | None = None
+    bonus_code: str | None = None
+
+
+@router.post("/deposit/method")
+async def create_method_deposit(
+    body: MethodDepositRequest,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Confirm-Payment submit for the XM-style flow — converts the local amount
+    to USD at the latest rate and opens a pending manual deposit."""
+    from ..services import payment_method_service
+    return await payment_method_service.create_method_deposit(
+        current_user["user_id"], body.method_id, body.pay_amount, body.utr, db,
+        bonus_code=body.bonus_code,
+    )
 
 
 @router.get("/bonus/overview")

@@ -22,8 +22,16 @@ import PositionsPanel from '@/components/trading/PositionsPanel';
 import { ActiveAccountBadge } from '@/components/trading/ActiveAccountBadge';
 import TerminalLeftRail, { type TerminalSpaceId } from '@/components/trading/TerminalLeftRail';
 
-const AdvancedChart = dynamic(() => import('@/components/charts/AdvancedChart'), { ssr: false });
-const TradingViewNewsTimeline = dynamic(() => import('@/components/charts/TradingViewNewsTimeline'), {
+// Client 2026-06-19 chose TradingView's polished Advanced Chart over the
+// broker-fed native chart, accepting that its prices are TradingView's own
+// Full TradingView Charting Library fed by OUR engine data (candles match the
+// running P&L). The licensed library lives in public/charting_library/ and the
+// datafeed in src/lib/charting/datafeed.ts. Revert to
+// '@/components/charts/AdvancedChart' for the public OANDA widget.
+const LiveChart = dynamic(() => import('@/components/charts/ChartingLibraryChart'), { ssr: false });
+// In-house news panel (ForexFactory economic events + live forex headlines),
+// replacing the previous TradingView news timeline embed. (client 2026-07-09)
+const MarketNewsPanel = dynamic(() => import('@/components/charts/MarketNewsPanel'), {
   ssr: false,
 });
 
@@ -359,7 +367,7 @@ export default function TradingTerminalPage() {
                 <span className="w-14" aria-hidden />
               </div>
               <div className="flex-1 min-h-0">
-                <TradingViewNewsTimeline />
+                <MarketNewsPanel className="h-full" />
               </div>
             </div>
           )}
@@ -517,7 +525,7 @@ export default function TradingTerminalPage() {
                   </div>
                 ) : null}
                 <div className="flex-1 min-h-0 min-w-0 overflow-hidden relative">
-                  <AdvancedChart />
+                  <LiveChart />
                 </div>
               </div>
 
@@ -643,7 +651,7 @@ export default function TradingTerminalPage() {
               </div>
             ) : null}
             <div className="flex-1 min-w-0 min-h-0 overflow-hidden relative">
-              <AdvancedChart />
+              <LiveChart />
             </div>
           </div>
 
@@ -688,7 +696,7 @@ export default function TradingTerminalPage() {
                   </button>
                 </div>
                 <div className="flex-1 min-h-0">
-                  <TradingViewNewsTimeline />
+                  <MarketNewsPanel className="h-full" />
                 </div>
               </div>
             ) : terminalMarketsOpen ? (

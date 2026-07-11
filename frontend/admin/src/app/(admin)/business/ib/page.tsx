@@ -26,6 +26,7 @@ interface IBAgent {
   total_earned: number;
   pending_payout: number;
   level: number;
+  ib_type?: 'super_ib' | 'ib' | 'sub_ib' | null;
   is_active: boolean;
   commission_plan_id?: string;
   custom_commission_per_lot?: number;
@@ -53,6 +54,7 @@ interface IBTreeNode {
   email: string;
   referral_code: string;
   level: number;
+  ib_type?: 'super_ib' | 'ib' | 'sub_ib';
   total_earned: number;
   referral_count: number;
   children: IBTreeNode[];
@@ -65,6 +67,9 @@ interface ReferralUser {
   trades: number;
   commission_generated: number;
   joined_at: string | null;
+  is_ib?: boolean;
+  ib_level?: number | null;
+  ib_type?: 'super_ib' | 'ib' | 'sub_ib' | null;
 }
 
 interface UnassignedUser {
@@ -76,12 +81,78 @@ interface UnassignedUser {
 
 type Tab = 'applications' | 'active' | 'tree';
 
+// Role filter shared by the Active IBs table and the IB Tree.
+type RoleFilter = 'all' | 'super_ib' | 'ib' | 'sub_ib';
+const ROLE_FILTERS: { id: RoleFilter; label: string }[] = [
+  { id: 'all', label: 'All' },
+  { id: 'super_ib', label: 'Super IB' },
+  { id: 'ib', label: 'IB' },
+  { id: 'sub_ib', label: 'Sub-IB' },
+];
+
+function roleLabel(type?: string | null): string {
+  return type === 'super_ib' ? 'Super IB' : type === 'sub_ib' ? 'Sub-IB' : 'IB';
+}
+
+function roleBadgeClass(type?: string | null): string {
+  return type === 'super_ib'
+    ? 'bg-primary/10 text-primary border-primary/25'
+    : type === 'sub_ib'
+      ? 'bg-amber-500/10 text-amber-500 border-amber-500/25'
+      : 'bg-bg-tertiary border-border-primary text-text-secondary';
+}
+
+function RoleBadge({ type }: { type?: string | null }) {
+  return (
+    <span className={cn('text-xxs px-1.5 py-0.5 rounded-sm border whitespace-nowrap', roleBadgeClass(type))}>
+      {roleLabel(type)}
+    </span>
+  );
+}
+
+// Depth-first flatten of the IB tree — used to render a flat, role-filtered list.
+function flattenTree(nodes: IBTreeNode[]): IBTreeNode[] {
+  const out: IBTreeNode[] = [];
+  const walk = (arr: IBTreeNode[]) => {
+    for (const n of arr) {
+      out.push(n);
+      if (n.children?.length) walk(n.children);
+    }
+  };
+  walk(nodes);
+  return out;
+}
+
+// Reusable role filter pill bar.
+function RoleFilterBar({ value, onChange }: { value: RoleFilter; onChange: (r: RoleFilter) => void }) {
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      {ROLE_FILTERS.map((f) => (
+        <button
+          key={f.id}
+          type="button"
+          onClick={() => onChange(f.id)}
+          className={cn(
+            'px-2.5 py-1 rounded-md text-xxs font-medium border transition-fast',
+            value === f.id
+              ? 'bg-primary/15 text-primary border-primary/30'
+              : 'bg-transparent text-text-tertiary border-border-primary hover:text-text-secondary hover:border-border-secondary',
+          )}
+        >
+          {f.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function formatMoney(n: number) {
   return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 export default function IBPage() {
   const [tab, setTab] = useState<Tab>('applications');
+  const [roleFilter, setRoleFilter] = useState<RoleFilter>('all');
   const [applications, setApplications] = useState<IBApplication[]>([]);
   const [agents, setAgents] = useState<IBAgent[]>([]);
   const [loading, setLoading] = useState(true);
@@ -219,7 +290,19 @@ export default function IBPage() {
           adminApi.get<{ items: UnassignedUser[] }>('/business/ib/users/unassigned', { per_page: '100' }),
           adminApi.get<{ items: IBAgent[] }>('/business/ib/agents'),
         ]);
-        setIbTree(Array.isArray(treeRes) ? treeRes : []);
+        const treeArr = Array.isArray(treeRes) ? treeRes : [];
+        setIbTree(treeArr);
+        // Auto-expand the ENTIRE hierarchy so the full tree (every sub-IB
+        // level, with each IB's user + sub-IB counts) is visible at once
+        // instead of being collapsed behind the chevrons. Admins wanted the
+        // whole downline / history in view without clicking each node open.
+        const allIds = new Set<string>();
+        const collect = (nodes: IBTreeNode[]) => nodes.forEach((n) => {
+          allIds.add(n.id);
+          if (n.children && n.children.length) collect(n.children);
+        });
+        collect(treeArr);
+        setExpandedNodes(allIds);
         setUnassignedUsers(unassignedRes.items || []);
         setAllAgents(agentsRes.items || []);
         setTreeLoading(false);
@@ -279,6 +362,21 @@ export default function IBPage() {
   const selectIB = (node: IBTreeNode) => {
     setSelectedIB(node);
     fetchIBReferrals(node.id);
+  };
+
+  // Find a tree node by its user id (recursive) so a sub-IB shown in an IB's
+  // user list can be clicked to drill straight into that sub-IB's own users.
+  const findNodeByUserId = (nodes: IBTreeNode[], userId: string): IBTreeNode | null => {
+    for (const n of nodes) {
+      if (n.user_id === userId) return n;
+      const hit = findNodeByUserId(n.children || [], userId);
+      if (hit) return hit;
+    }
+    return null;
+  };
+  const drillIntoUser = (userId: string) => {
+    const node = findNodeByUserId(ibTree, userId);
+    if (node) selectIB(node);
   };
 
   const fetchCommissionPlans = useCallback(async () => {
@@ -701,15 +799,23 @@ export default function IBPage() {
                 </div>
               )
             ) : tab === 'active' ? (
-              agents.length === 0 ? (
-                <div className="text-center text-xs text-text-tertiary py-12">No active IBs</div>
-              ) : (
-                <div className="border border-border-primary rounded-md overflow-hidden">
-                  <div className="overflow-x-auto">
-                    <table className="w-full min-w-[960px]">
-                      <thead>
-                        <tr className="border-b border-border-primary bg-bg-tertiary/40">
-                          {['Name', 'Referral Code', 'Level', 'Referrals', 'Total Earned', 'Pending', 'Joined', 'Actions'].map((col) => (
+              (() => {
+                const filteredAgents = agents.filter((a) => roleFilter === 'all' || a.ib_type === roleFilter);
+                return (
+                <div className="space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <RoleFilterBar value={roleFilter} onChange={setRoleFilter} />
+                    <span className="text-xxs text-text-tertiary">{filteredAgents.length} IB{filteredAgents.length !== 1 ? 's' : ''}</span>
+                  </div>
+                  {filteredAgents.length === 0 ? (
+                    <div className="text-center text-xs text-text-tertiary py-12">{agents.length === 0 ? 'No active IBs' : 'No IBs match this filter'}</div>
+                  ) : (
+                  <div className="border border-border-primary rounded-md overflow-hidden">
+                    <div className="overflow-x-auto">
+                      <table className="w-full min-w-[1020px]">
+                        <thead>
+                          <tr className="border-b border-border-primary bg-bg-tertiary/40">
+                            {['Name', 'Referral Code', 'Role', 'Level', 'Referrals', 'Total Earned', 'Pending', 'Joined', 'Actions'].map((col) => (
                             <th key={col} className={cn('text-left px-4 py-2.5 text-xxs font-medium text-text-tertiary uppercase tracking-wide', ['Total Earned', 'Pending'].includes(col) && 'text-right', col === 'Actions' && 'text-right')}>
                               {col}
                             </th>
@@ -717,7 +823,7 @@ export default function IBPage() {
                         </tr>
                       </thead>
                       <tbody>
-                        {agents.map((agent) => (
+                        {filteredAgents.map((agent) => (
                           <tr key={agent.id} className="border-b border-border-primary/50 transition-fast hover:bg-bg-hover">
                             <td className="px-4 py-2.5">
                               <div className="flex items-center gap-1.5">
@@ -755,6 +861,7 @@ export default function IBPage() {
                                 {agent.referral_code}
                               </button>
                             </td>
+                            <td className="px-4 py-2.5"><RoleBadge type={agent.ib_type} /></td>
                             <td className="px-4 py-2.5 text-xs text-text-primary">L{agent.level}</td>
                             <td className="px-4 py-2.5 text-xs text-text-primary font-mono tabular-nums">{agent.referral_count}</td>
                             <td className="px-4 py-2.5 text-xs text-success text-right font-mono tabular-nums">${formatMoney(agent.total_earned)}</td>
@@ -776,10 +883,13 @@ export default function IBPage() {
                           </tr>
                         ))}
                       </tbody>
-                    </table>
-                  </div>
+                        </table>
+                      </div>
+                    </div>
+                  )}
                 </div>
-              )
+                );
+              })()
             ) : (
               /* ── IB Tree Tab ─────────────────────────────────────────── */
               <div className="space-y-4">
@@ -796,24 +906,54 @@ export default function IBPage() {
                         <span className="text-xs font-medium text-text-primary">IB Hierarchy</span>
                         <span className="ml-auto text-xxs text-text-tertiary">{ibTree.length} root IB{ibTree.length !== 1 ? 's' : ''}</span>
                       </div>
-                      {ibTree.length === 0 ? (
-                        <div className="text-center text-xs text-text-tertiary py-10">No IBs found</div>
-                      ) : (
-                        <div className="max-h-[500px] overflow-y-auto">
-                          {ibTree.map((node) => (
-                            <IBTreeNodeRow
-                              key={node.id}
-                              node={node}
-                              depth={0}
-                              expanded={expandedNodes}
-                              onToggle={toggleNode}
-                              selected={selectedIB?.id}
-                              onSelect={selectIB}
-                              onTransfer={(userId, userName) => { setTransferModal({ userId, userName }); setTransferTargetIb(''); }}
-                            />
-                          ))}
-                        </div>
-                      )}
+                      <div className="px-3 py-2 border-b border-border-primary">
+                        <RoleFilterBar value={roleFilter} onChange={setRoleFilter} />
+                      </div>
+                      {(() => {
+                        if (ibTree.length === 0) {
+                          return <div className="text-center text-xs text-text-tertiary py-10">No IBs found</div>;
+                        }
+                        // Role filter active → flat list of matching nodes only
+                        // (e.g. Sub-IB shows just the sub-IBs, no hierarchy).
+                        if (roleFilter !== 'all') {
+                          const flat = flattenTree(ibTree).filter((n) => n.ib_type === roleFilter);
+                          return flat.length === 0 ? (
+                            <div className="text-center text-xs text-text-tertiary py-10">No {roleLabel(roleFilter)}s found</div>
+                          ) : (
+                            <div className="max-h-[500px] overflow-y-auto">
+                              {flat.map((node) => (
+                                <IBTreeNodeRow
+                                  key={node.id}
+                                  node={{ ...node, children: [] }}
+                                  depth={0}
+                                  expanded={expandedNodes}
+                                  onToggle={toggleNode}
+                                  selected={selectedIB?.id}
+                                  onSelect={selectIB}
+                                  onTransfer={(userId, userName) => { setTransferModal({ userId, userName }); setTransferTargetIb(''); }}
+                                />
+                              ))}
+                            </div>
+                          );
+                        }
+                        // Default → full hierarchy.
+                        return (
+                          <div className="max-h-[500px] overflow-y-auto">
+                            {ibTree.map((node) => (
+                              <IBTreeNodeRow
+                                key={node.id}
+                                node={node}
+                                depth={0}
+                                expanded={expandedNodes}
+                                onToggle={toggleNode}
+                                selected={selectedIB?.id}
+                                onSelect={selectIB}
+                                onTransfer={(userId, userName) => { setTransferModal({ userId, userName }); setTransferTargetIb(''); }}
+                              />
+                            ))}
+                          </div>
+                        );
+                      })()}
                     </div>
 
                     {/* Right: Selected IB Users */}
@@ -848,7 +988,19 @@ export default function IBPage() {
                               {ibReferrals.map((u) => (
                                 <div key={u.user_id} className="flex items-center justify-between px-3 py-2.5 border-b border-border-primary/50 hover:bg-bg-hover transition-fast">
                                   <div className="min-w-0">
-                                    <p className="text-xs text-text-primary truncate">{u.name || u.email}</p>
+                                    <div className="flex items-center gap-1.5 min-w-0">
+                                      <p className="text-xs text-text-primary truncate">{u.name || u.email}</p>
+                                      {u.is_ib && (
+                                        <button
+                                          type="button"
+                                          onClick={(e) => { e.stopPropagation(); drillIntoUser(u.user_id); }}
+                                          title="View this IB's own users"
+                                          className="shrink-0 inline-flex items-center gap-0.5 text-xxs px-1.5 py-0.5 rounded-sm bg-buy/10 text-buy border border-buy/20 hover:bg-buy/20 transition-fast"
+                                        >
+                                          {u.ib_type === 'super_ib' ? 'Super IB' : u.ib_type === 'sub_ib' ? 'Sub-IB' : 'IB'} <ChevronRight size={9} />
+                                        </button>
+                                      )}
+                                    </div>
                                     <p className="text-xxs text-text-tertiary truncate">{u.email}</p>
                                     <p className="text-xxs text-text-tertiary mt-0.5">{u.trades} trade{u.trades !== 1 ? 's' : ''} · ${formatMoney(u.commission_generated)} comm.</p>
                                   </div>
@@ -1355,8 +1507,18 @@ function IBTreeNodeRow({
 
         <div className="flex items-center gap-2 ml-2 shrink-0">
           <span className="text-xxs text-text-tertiary font-mono">{node.referral_code}</span>
-          <span className="text-xxs px-1.5 py-0.5 rounded-sm bg-bg-tertiary border border-border-primary text-text-tertiary">
-            L{node.level}
+          {/* ROLE by lineage (from backend ib_type): super_ib = ONLY the SDA05
+              root, ib = directly under it, sub_ib = deeper. NOT by tree depth —
+              that badged every root IB as "Super IB". (client 2026-07-09) */}
+          <span className={cn(
+            'text-xxs px-1.5 py-0.5 rounded-sm border',
+            node.ib_type === 'super_ib'
+              ? 'bg-primary/10 text-primary border-primary/25'
+              : node.ib_type === 'sub_ib'
+                ? 'bg-amber-500/10 text-amber-500 border-amber-500/25'
+                : 'bg-bg-tertiary border-border-primary text-text-secondary',
+          )}>
+            {node.ib_type === 'super_ib' ? 'Super IB' : node.ib_type === 'sub_ib' ? `Sub-IB · L${node.level}` : 'IB'}
           </span>
           {node.referral_count > 0 && (
             <span className="text-xxs px-1.5 py-0.5 rounded-sm bg-primary/10 text-primary border border-primary/20">
@@ -1365,7 +1527,7 @@ function IBTreeNodeRow({
           )}
           {hasChildren && (
             <span className="text-xxs px-1.5 py-0.5 rounded-sm bg-buy/10 text-buy border border-buy/20">
-              {node.children.length} sub-IB{node.children.length !== 1 ? 's' : ''}
+              {node.children.length} below
             </span>
           )}
         </div>

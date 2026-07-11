@@ -1,8 +1,10 @@
 import uuid
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Query, Request, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import IntegrityError, DBAPIError
 
 from packages.common.src.database import get_db
 from dependencies import require_permission
@@ -41,6 +43,57 @@ async def get_user_detail(
     db: AsyncSession = Depends(get_db),
 ):
     return await user_service.get_user_detail(user_id=user_id, db=db)
+
+
+class PromotionalRequest(BaseModel):
+    is_promotional: bool
+
+
+@router.post("/{user_id}/promotional")
+async def set_user_promotional(
+    user_id: uuid.UUID,
+    body: PromotionalRequest,
+    admin: User = Depends(require_permission("users.add_fund")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Mark/unmark the WHOLE user as promotional (pilot). A promotional user is
+    funded for showcase and stays fully live on their own dashboard, but ALL
+    their activity (every account + FR/referral/IB/bonus) is excluded from the
+    admin's real company financials."""
+    return await user_service.set_user_promotional(
+        user_id=user_id, is_promotional=body.is_promotional, db=db,
+    )
+
+
+class FrReferralOverrideBody(BaseModel):
+    # null on a leg = clear it (fall back to the global %).
+    principal_pct: float | None = None
+    interest_pct: float | None = None
+
+
+@router.get("/{user_id}/fr-referral-override")
+async def get_fr_referral_override(
+    user_id: uuid.UUID,
+    admin: User = Depends(require_permission("users.view")),
+    db: AsyncSession = Depends(get_db),
+):
+    """This referrer's custom FR referral-commission % (and the global defaults)."""
+    return await user_service.get_fr_referral_override(user_id=user_id, db=db)
+
+
+@router.post("/{user_id}/fr-referral-override")
+async def set_fr_referral_override(
+    user_id: uuid.UUID,
+    body: FrReferralOverrideBody,
+    admin: User = Depends(require_permission("users.add_fund")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Set/clear a custom FR referral-commission % for this referrer. Send null
+    on a leg to clear it (that leg falls back to the global setting)."""
+    return await user_service.set_fr_referral_override(
+        user_id=user_id, principal_pct=body.principal_pct,
+        interest_pct=body.interest_pct, db=db,
+    )
 
 
 @router.get("/{user_id}/deposits")
@@ -208,6 +261,28 @@ async def block_trading(
     )
 
 
+class BankDepositBody(BaseModel):
+    enabled: bool
+
+
+@router.post("/{user_id}/bank-deposit")
+async def set_bank_deposit(
+    user_id: uuid.UUID,
+    body: BankDepositBody,
+    admin: User = Depends(require_permission("users.add_fund")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Show/hide the bank (manual) deposit option for THIS user specifically
+    (client 2026-06-23). Overrides the global wallet.manual_enabled toggle."""
+    from packages.common.src.models import User as _U
+    u = (await db.execute(select(_U).where(_U.id == user_id))).scalar_one_or_none()
+    if not u:
+        raise HTTPException(status_code=404, detail="User not found")
+    u.bank_deposit_enabled = bool(body.enabled)
+    await db.commit()
+    return {"message": "Bank deposit visibility updated", "bank_deposit_enabled": bool(body.enabled)}
+
+
 @router.post("/{user_id}/kill-switch")
 async def kill_switch(
     user_id: uuid.UUID,
@@ -328,7 +403,33 @@ async def delete_user(
     trading accounts, copy-trade allocations, copy trades, deposits, withdrawals,
     transactions, referrals, IB profile, and finally the user row. Cannot be
     undone."""
-    return await user_service.delete_user(
-        user_id=user_id, admin_id=admin.id,
-        ip_address=request.client.host if request.client else None, db=db,
-    )
+    # Safety net: a complex user (master trader / IB with many relationships)
+    # can hit a FK on a child table the service doesn't yet clean up. That used
+    # to surface as a raw 500 ("Internal server error"). Catch any DB error,
+    # roll back, and return a clear 409 naming the blocking constraint so the
+    # admin (and we) know exactly which table to handle next.
+    try:
+        return await user_service.delete_user(
+            user_id=user_id, admin_id=admin.id,
+            ip_address=request.client.host if request.client else None, db=db,
+        )
+    except HTTPException:
+        raise  # clean 404 / 409 the service already raised — pass through
+    except Exception as e:
+        # Broadened from (IntegrityError, DBAPIError): once a delete in the
+        # service fails, the transaction is aborted and the NEXT statement can
+        # raise a SQLAlchemy PendingRollbackError / InvalidRequestError — NOT a
+        # DBAPIError — which escaped as a raw 500. Catch everything, roll back,
+        # and return a clear 409 (client 2026-06-20).
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        orig = getattr(e, "orig", e)
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Cannot permanently delete this user — a record still references them ({orig}). "
+                "Use Soft Delete to disable the account while keeping records."
+            ),
+        )

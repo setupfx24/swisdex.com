@@ -32,19 +32,19 @@ function formatTier(t: string | null | undefined): string {
 function formatReason(code: string | null | undefined): string | null {
   if (!code) return null;
   switch (code) {
-    case 'not_a_loss':           return 'Trade closed in profit — no claim';
-    case 'min_duration':         return 'Trade closed too quickly (anti-abuse minimum)';
-    case 'hedge':                return 'Hedge detected on the same instrument';
-    case 'cooldown':             return 'Cooldown window between claims is still active';
-    case 'daily_claim_limit':    return 'Daily claim limit reached';
-    case 'daily_payout_limit':   return 'Daily payout cap reached';
-    case 'vol_too_low':          return 'Market volatility too low';
-    case 'vol_too_high':         return 'Market volatility too high';
-    case 'news_blackout':        return 'News blackout — claims paused';
-    case 'insurance_disabled':   return 'Insurance was disabled at close time';
-    case 'policy_expired':       return 'Trade closed after the policy validity window';
-    case 'cap_exhausted':        return 'Coverage cap already paid out on prior partial closes';
-    case 'zero_payout':          return 'Calculated payout was zero';
+    case 'not_a_loss':           return 'Your trade closed in profit, so there was nothing to claim — insurance only covers a loss.';
+    case 'min_duration':         return 'The trade was closed too soon after opening. An insured trade must stay open for a minimum time before it can be claimed.';
+    case 'hedge':                return 'You had an opposite (hedge) trade open on the same instrument, so this was not a real loss — no payout.';
+    case 'cooldown':             return 'You claimed insurance recently. There is a short wait between claims — you can claim again once the cooldown period ends.';
+    case 'daily_claim_limit':    return 'You have used all your insurance claims for today. Please try again tomorrow.';
+    case 'daily_payout_limit':   return "Today's maximum insurance payout has already been reached. Please try again tomorrow.";
+    case 'vol_too_low':          return 'The market was too calm (very low movement) when the trade closed — claims are not available in these conditions.';
+    case 'vol_too_high':         return 'The market was moving too fast (extreme volatility) when the trade closed — claims are paused in these conditions.';
+    case 'news_blackout':        return 'Claims were paused during a major market news event when this trade closed.';
+    case 'insurance_disabled':   return 'Insurance was switched off at the time this trade closed.';
+    case 'policy_expired':       return 'The trade stayed open past the insurance cover window, so the cover had already expired before it closed.';
+    case 'cap_exhausted':        return 'The coverage limit for this trade was already fully paid out on earlier partial closes.';
+    case 'zero_payout':          return 'The covered part of the loss worked out to zero, so there was no payout.';
     default:                     return code.replace(/_/g, ' ');
   }
 }

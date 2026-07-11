@@ -30,13 +30,19 @@ async def list_transactions(
     search: str = Query(None),
     start_date: str | None = Query(None),
     end_date: str | None = Query(None),
+    exclude: str | None = Query(None, description="Comma-separated transaction types to exclude (e.g. trading)"),
+    only: str | None = Query(None, description="Comma-separated WHITELIST of types — show ONLY these (e.g. deposit,withdrawal)"),
     admin: User = Depends(require_permission("deposits.view")),
     db: AsyncSession = Depends(get_db),
 ):
+    exclude_types = [t.strip() for t in exclude.split(",") if t.strip()] if exclude else None
+    include_types = [t.strip() for t in only.split(",") if t.strip()] if only else None
     return await transaction_service.list_transactions(
         page=page, per_page=per_page, type_filter=type_filter, search=search, db=db,
         start_date=_date_bound(start_date, end_of_day=False),
         end_date=_date_bound(end_date, end_of_day=True),
+        exclude_types=exclude_types,
+        include_types=include_types,
     )
 
 

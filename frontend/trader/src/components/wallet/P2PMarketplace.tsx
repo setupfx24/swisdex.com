@@ -30,6 +30,7 @@ const RM_METHODS: { key: string; label: string; hint: string }[] = [
   { key: 'UPI', label: 'UPI', hint: 'Your RM will share a UPI ID to pay to.' },
   { key: 'USDT', label: 'USDT', hint: 'Your RM will share a USDT (TRC20/ERC20) address.' },
   { key: 'Local Bank Transfer', label: 'Local Bank Transfer', hint: 'Your RM will share bank account / IFSC details.' },
+  { key: 'Cash', label: 'Cash', hint: 'Your RM will coordinate an in-person / cash payment with you.' },
 ];
 
 interface UserProfile {
@@ -52,17 +53,39 @@ export default function P2PMarketplace({ mode }: { mode: Side }) {
   const [note, setNote] = useState<string>('');
   const [submitting, setSubmitting] = useState(false);
   const [done, setDone] = useState(false);
+  // Admin-fixed bank rate (dollar price = local units per 1 USD) so the RM form
+  // shows the local-currency equivalent of the USD amount — easier for the user.
+  const [rate, setRate] = useState<{ currency: string; deposit: number | null; withdraw: number | null } | null>(null);
 
   // Re-prime phone when the auth store hydrates after first paint.
   useEffect(() => {
     if (!phone && authUser?.phone) setPhone(authUser.phone);
   }, [authUser?.phone, phone]);
 
+  // Pull the admin's fixed bank rate (from the payment-methods config) once.
+  useEffect(() => {
+    api.get<{ items: { pay_currency?: string; usd_rate?: number | null; withdrawal_usd_rate?: number | null }[] }>('/wallet/deposit/methods')
+      .then((r) => {
+        const m = (r?.items || []).find((x) => x.usd_rate != null || x.withdrawal_usd_rate != null);
+        if (m) setRate({ currency: m.pay_currency || 'INR', deposit: m.usd_rate ?? null, withdraw: m.withdrawal_usd_rate ?? null });
+      })
+      .catch(() => {});
+  }, []);
+
   const fullName = (
     [authUser?.first_name, authUser?.last_name].filter(Boolean).join(' ').trim()
     || authUser?.email
     || '—'
   );
+
+  // Local-currency estimate at the admin's fixed rate. Shown for local methods
+  // on deposit (what they'll pay) and always on withdraw (what they'll receive).
+  const LOCAL_METHODS = ['UPI', 'Local Bank Transfer', 'Cash'];
+  const dollarPrice = rate ? (side === 'deposit' ? rate.deposit : rate.withdraw) : null;
+  const showLocal =
+    dollarPrice != null && Number(amount) > 0 &&
+    (side === 'withdraw' || LOCAL_METHODS.includes(method));
+  const localAmount = showLocal ? Number(amount) * (dollarPrice as number) : null;
 
   const submit = async () => {
     const amt = Number(amount);
@@ -193,10 +216,22 @@ export default function P2PMarketplace({ mode }: { mode: Side }) {
               step="0.01"
               value={amount}
               onChange={(e) => setAmount(e.target.value)}
+              // Stop the mouse wheel from silently changing the amount when the
+              // field is focused (e.g. 1000 -> 999.97 from a few scroll ticks).
+              onWheel={(e) => e.currentTarget.blur()}
               placeholder="0.00"
               className="w-full pl-7 pr-4 py-2.5 rounded-xl border border-border-primary bg-bg-secondary text-text-primary placeholder:text-text-tertiary outline-none focus:border-accent/50 font-mono font-bold text-base"
             />
           </div>
+          {localAmount != null && rate && (
+            <p className="text-[11px] text-text-secondary mt-1.5">
+              {side === 'deposit' ? "You'll pay" : "You'll receive"} ≈{' '}
+              <span className="font-bold text-text-primary">
+                {localAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} {rate.currency}
+              </span>{' '}
+              at the current rate.
+            </p>
+          )}
         </Field>
 
         <Field label="Phone number">

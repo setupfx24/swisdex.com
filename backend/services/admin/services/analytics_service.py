@@ -1,14 +1,16 @@
 """Admin Analytics Service — dashboard stats, exposure, profitable users."""
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 
-from sqlalchemy import select, func, case
+from fastapi import HTTPException
+from sqlalchemy import select, func, case, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from packages.common.src.models import (
     User, Position, Order, Transaction, Deposit, Withdrawal,
     Instrument, PositionStatus, OrderSide, TradingAccount,
     TradeHistory, MasterAccount, IBProfile, IBCommission,
-    InvestorAllocation, CopyTrade, UserBonus,
+    InvestorAllocation, CopyTrade, UserBonus, PromotionalExpense,
 )
 
 
@@ -201,15 +203,25 @@ async def analytics_dashboard(
     )
     total_followers = total_followers_q.scalar() or 0
 
-    bonus_given_q = await db.execute(
-        select(func.coalesce(func.sum(UserBonus.amount), 0))
-    )
-    total_bonus_given = float(bonus_given_q.scalar() or 0)
+    # "Bonus given" = ALL non-deposit tradable money handed to users: account
+    # CREDIT (Give Credit) + bonus WALLET (main_wallet_bonus). Previously this
+    # summed only UserBonus rows, so credit/grants showed $0 even after money had
+    # been given — matches Finance Overview's Net Credit now (client 2026-07-03).
+    credit_sum = (await db.execute(
+        select(func.coalesce(func.sum(TradingAccount.credit), 0))
+    )).scalar() or 0
+    wallet_bonus_sum = (await db.execute(
+        select(func.coalesce(func.sum(User.main_wallet_bonus), 0))
+    )).scalar() or 0
+    total_bonus_given = float(credit_sum) + float(wallet_bonus_sum)
 
-    active_bonus_q = await db.execute(
+    active_credit = (await db.execute(
+        select(func.count()).select_from(TradingAccount).where(TradingAccount.credit > 0)
+    )).scalar() or 0
+    active_user_bonus = (await db.execute(
         select(func.count(UserBonus.id)).where(UserBonus.status == "active")
-    )
-    active_bonuses = active_bonus_q.scalar() or 0
+    )).scalar() or 0
+    active_bonuses = int(active_credit) + int(active_user_bonus)
 
     return {
         "today": today,
@@ -270,49 +282,83 @@ async def finance_overview(db: AsyncSession, start_date=None, end_date=None) -> 
             q = q.where(col <= end_date)
         return q
 
+    # ── Promotional / pilot exclusion ─────────────────────────────────
+    # The admin flags a WHOLE USER as promotional (marketing/showcase). Their
+    # money must NEVER count in the broker's real company figures. User-scoped
+    # rows (FR, referral, IB, bonus wallet) are excluded by user_id; account-
+    # scoped rows (trades, positions, orders, deposits, withdrawals, credit) by
+    # the ids of ALL accounts those promo users own. (client 2026-07-03)
+    promo_user_ids = [r[0] for r in (await db.execute(
+        select(User.id).where(User.is_promotional == True)
+    )).all()]
+    promo_acct_ids = [r[0] for r in (await db.execute(
+        select(TradingAccount.id).where(TradingAccount.user_id.in_(promo_user_ids))
+    )).all()] if promo_user_ids else []
+
+    # Demo accounts/users are practice money — like promo, they must NEVER count
+    # in the real company figures. Excluded the same way (client 2026-07-03).
+    demo_acct_ids = [r[0] for r in (await db.execute(
+        select(TradingAccount.id).where(TradingAccount.is_demo == True)
+    )).all()]
+    demo_user_ids = [r[0] for r in (await db.execute(
+        select(User.id).where(User.is_demo == True)
+    )).all()]
+
+    # Combined promo + demo exclusion sets used by the helpers below.
+    excl_acct_ids = list(set(promo_acct_ids) | set(demo_acct_ids))
+    excl_user_ids = list(set(promo_user_ids) | set(demo_user_ids))
+
+    def _xa(q, col):
+        """Exclude promo + demo ACCOUNTS from an account-scoped query."""
+        return q.where(col.notin_(excl_acct_ids)) if excl_acct_ids else q
+
+    def _xu(q, col):
+        """Exclude promo + demo USERS from a user-scoped query."""
+        return q.where(col.notin_(excl_user_ids)) if excl_user_ids else q
+
     # ── Net P&L sources ───────────────────────────────────────────────
     user_pnl = float((await db.execute(
-        _dr(select(func.coalesce(func.sum(TradeHistory.profit), 0)), TradeHistory.closed_at)
+        _xa(_dr(select(func.coalesce(func.sum(TradeHistory.profit), 0)), TradeHistory.closed_at), TradeHistory.account_id)
     )).scalar() or 0)
     broker_trading = -user_pnl  # user loss = broker gain
 
     commission = abs(float((await db.execute(
-        _dr(select(func.coalesce(func.sum(Position.commission), 0)).where(Position.commission != 0), Position.created_at)
+        _xa(_dr(select(func.coalesce(func.sum(Position.commission), 0)).where(Position.commission != 0), Position.created_at), Position.account_id)
     )).scalar() or 0))
     # Spread revenue — its OWN line, separate from commission (client
     # 2026-06-16). Tracked per filled order from 2026-06-17; older trades
     # show 0 (spread wasn't stored before).
     spread = float((await db.execute(
-        _dr(select(func.coalesce(func.sum(Order.spread_revenue), 0)).where(Order.status == "filled"), Order.created_at)
+        _xa(_dr(select(func.coalesce(func.sum(Order.spread_revenue), 0)).where(Order.status == "filled"), Order.created_at), Order.account_id)
     )).scalar() or 0)
     swap = abs(float((await db.execute(
-        _dr(select(func.coalesce(func.sum(Position.swap), 0)).where(Position.swap != 0), Position.created_at)
+        _xa(_dr(select(func.coalesce(func.sum(Position.swap), 0)).where(Position.swap != 0), Position.created_at), Position.account_id)
     )).scalar() or 0))
 
     admin_commission = float((await db.execute(
-        _dr(select(func.coalesce(func.sum(Transaction.amount), 0)).where(
+        _xa(_dr(select(func.coalesce(func.sum(Transaction.amount), 0)).where(
             Transaction.type == "admin_commission",
-        ), Transaction.created_at)
+        ), Transaction.created_at), Transaction.account_id)
     )).scalar() or 0)
 
     insurance_fees = abs(float((await db.execute(
-        _dr(select(func.coalesce(func.sum(Transaction.amount), 0)).where(
+        _xa(_dr(select(func.coalesce(func.sum(Transaction.amount), 0)).where(
             Transaction.type == "insurance_fee",
-        ), Transaction.created_at)
+        ), Transaction.created_at), Transaction.account_id)
     )).scalar() or 0))
     insurance_payouts = abs(float((await db.execute(
-        _dr(select(func.coalesce(func.sum(Transaction.amount), 0)).where(
+        _xa(_dr(select(func.coalesce(func.sum(Transaction.amount), 0)).where(
             Transaction.type == "insurance_payout",
-        ), Transaction.created_at)
+        ), Transaction.created_at), Transaction.account_id)
     )).scalar() or 0))
 
     ib_commission = float((await db.execute(
-        _dr(select(func.coalesce(func.sum(IBCommission.amount), 0)), IBCommission.created_at)
+        _xu(_dr(select(func.coalesce(func.sum(IBCommission.amount), 0)), IBCommission.created_at), IBCommission.source_user_id)
     )).scalar() or 0)
     referral_commission = abs(float((await db.execute(
-        _dr(select(func.coalesce(func.sum(Transaction.amount), 0)).where(
+        _xu(_dr(select(func.coalesce(func.sum(Transaction.amount), 0)).where(
             Transaction.type.in_(["referral_commission", "ib_referral_bounty"]),
-        ), Transaction.created_at)
+        ), Transaction.created_at), Transaction.user_id)
     )).scalar() or 0))
 
     pnl_sources = [
@@ -329,13 +375,17 @@ async def finance_overview(db: AsyncSession, start_date=None, end_date=None) -> 
     net_pnl_total = round(sum(s["amount"] for s in pnl_sources), 2)
 
     # ── Deposits / Withdrawals by method ──────────────────────────────
+    # Exclude by USER, not account: deposits/withdrawals credit the MAIN WALLET
+    # so their account_id is NULL, and `account_id NOT IN (promo/demo ids)`
+    # evaluates NULL→dropped, which silently zeroed every wallet deposit/
+    # withdrawal once any promo/demo account existed (client 2026-07-06).
     async def _by_method(model, statuses):
         rows = (await db.execute(
-            _dr(
+            _xu(_dr(
                 select(model.method, func.coalesce(func.sum(model.amount), 0), func.count(model.id))
                 .where(model.status.in_(statuses)),
                 model.created_at,
-            ).group_by(model.method)
+            ), model.user_id).group_by(model.method)
         )).all()
         out = [{"method": (m or "other"), "amount": round(float(a or 0), 2), "count": int(c or 0)} for m, a, c in rows]
         out.sort(key=lambda x: x["amount"], reverse=True)
@@ -348,28 +398,28 @@ async def finance_overview(db: AsyncSession, start_date=None, end_date=None) -> 
 
     # ── Net credit (non-withdrawable tradable funds) ──────────────────
     bonus_wallet = float((await db.execute(
-        select(func.coalesce(func.sum(User.main_wallet_bonus), 0))
+        _xu(select(func.coalesce(func.sum(User.main_wallet_bonus), 0)), User.id)
     )).scalar() or 0)
     account_credit = float((await db.execute(
-        select(func.coalesce(func.sum(TradingAccount.credit), 0))
+        _xa(select(func.coalesce(func.sum(TradingAccount.credit), 0)), TradingAccount.id)
     )).scalar() or 0)
     # Best-effort split of the account-credit pool into insurance vs other
     # using lifetime credited transactions (the live balance itself doesn't
     # store its source).
     insurance_credited = abs(float((await db.execute(
-        select(func.coalesce(func.sum(Transaction.amount), 0)).where(
+        _xa(select(func.coalesce(func.sum(Transaction.amount), 0)).where(
             Transaction.type == "insurance_payout",
-        )
+        ), Transaction.account_id)
     )).scalar() or 0))
 
     # ── Fixed Return (separate from P&L) ──────────────────────────────
     # When a date window is given, scope to locks OPENED in that window
     # ("collected in this period"); otherwise all currently-active locks.
     active_locks = (await db.execute(
-        _dr(
+        _xu(_dr(
             select(FixedReturnLock).where(FixedReturnLock.state.in_(["active", "early_pending"])),
             FixedReturnLock.locked_at,
-        )
+        ), FixedReturnLock.user_id)
     )).scalars().all()
     fr_collected = 0.0
     fr_interest_paid = 0.0
@@ -378,6 +428,7 @@ async def finance_overview(db: AsyncSession, start_date=None, end_date=None) -> 
     _now = datetime.now(timezone.utc)
     by_tenure: dict[str, dict] = {}
     maturing: dict[str, dict] = {}
+    by_user: dict = {}  # uid -> {principal, interest_paid, interest_accrued, count}
     for lk in active_locks:
         p = float(lk.principal or 0)
         fr_collected += p
@@ -394,12 +445,27 @@ async def finance_overview(db: AsyncSession, start_date=None, end_date=None) -> 
         # from lock start until today (capped at maturity / projected total).
         td = int(lk.tenure_days or 30) or 30
         daily_interest = p * float(lk.rate_pct or 0) / 100.0 / td
+        # locked_at comes back tz-NAIVE from the DB (like every other datetime
+        # here); subtracting it from the aware _now raises TypeError, which the
+        # bare except swallowed → days_elapsed=0 → accrued was ALWAYS $0. Coerce
+        # to UTC-aware first, exactly like the rest of the codebase does.
         try:
-            days_elapsed = max(0, (_now - lk.locked_at).days) if lk.locked_at else 0
+            _la = lk.locked_at
+            if _la is not None and _la.tzinfo is None:
+                _la = _la.replace(tzinfo=timezone.utc)
+            days_elapsed = max(0, (_now - _la).days) if _la else 0
         except Exception:
             days_elapsed = 0
         total_days = max(1, cycles * td)
-        fr_accrued += min(projected, daily_interest * min(days_elapsed, total_days))
+        this_accrued = min(projected, daily_interest * min(days_elapsed, total_days))
+        fr_accrued += this_accrued
+        bu = by_user.setdefault(lk.user_id, {
+            "principal": 0.0, "interest_paid": 0.0, "interest_accrued": 0.0, "count": 0,
+        })
+        bu["principal"] += p
+        bu["interest_paid"] += paid
+        bu["interest_accrued"] += this_accrued
+        bu["count"] += 1
         t = lk.tenure_label or "—"
         by_tenure.setdefault(t, {"tenure": t, "principal": 0.0, "count": 0})
         by_tenure[t]["principal"] += p
@@ -418,8 +484,86 @@ async def finance_overview(db: AsyncSession, start_date=None, end_date=None) -> 
         key=lambda x: x["month"],
     )
 
+    # Per-user interest breakdown — how much interest each user's locks have
+    # generated (accrued day-by-day to date) and how much was actually paid out.
+    umap_fr = await _user_label_map(db, list(by_user.keys()))
+    fr_by_user = sorted(
+        [
+            {
+                "user_id": str(uid) if uid else None,
+                "name": umap_fr.get(uid, {}).get("name", "—"),
+                "email": umap_fr.get(uid, {}).get("email"),
+                "principal": round(v["principal"], 2),
+                "interest_accrued": round(v["interest_accrued"], 2),
+                "interest_paid": round(v["interest_paid"], 2),
+                "count": v["count"],
+            }
+            for uid, v in by_user.items()
+        ],
+        key=lambda x: x["interest_accrued"], reverse=True,
+    )[:100]
+
+    # Per-user AI-Powered-Staking referral commission RECEIVED — credited into a
+    # referrer's referral_commission_balance and recorded as a referral_commission
+    # transaction whose description mentions "staking". Date-scoped like the rest.
+    comm_q = select(
+        Transaction.user_id,
+        func.coalesce(func.sum(Transaction.amount), 0),
+        func.count(Transaction.id),
+    ).where(
+        Transaction.type == "referral_commission",
+        func.lower(Transaction.description).like("%staking%"),
+    )
+    comm_q = _xu(_dr(comm_q, Transaction.created_at), Transaction.user_id).group_by(Transaction.user_id)
+    comm_rows = (await db.execute(comm_q)).all()
+    umap_comm = await _user_label_map(db, [r[0] for r in comm_rows if r[0]])
+    fr_referral_commission = sorted(
+        [
+            {
+                "user_id": str(uid) if uid else None,
+                "name": umap_comm.get(uid, {}).get("name", "—"),
+                "email": umap_comm.get(uid, {}).get("email"),
+                "amount": round(float(total or 0), 2),
+                "count": int(cnt or 0),
+            }
+            for uid, total, cnt in comm_rows
+        ],
+        key=lambda x: x["amount"], reverse=True,
+    )
+
+    # ── Promotional Expenses (ONLY the EXTRA above standard) ──────────────
+    # Read purely from the promotional_expenses ledger — the premium a user was
+    # paid ABOVE the standard rate via a per-user custom offer (e.g. FR referral
+    # extra %, auto-logged in _pay_fr_referral) plus manual admin entries. NOT
+    # the full commissions/bonuses (those are normal business cost, not
+    # promotional). These are deliberate expense records → summed as-is.
+    _PE_LABELS = {
+        "fr_referral_extra": "Fixed Return referral — extra %",
+        "extra_fr_interest": "Extra Fixed Return interest",
+        "fr_referral_bonus": "Fixed Return referral bonus",
+        "custom_benefit": "Custom promotional benefit",
+        "manual": "Manual entries",
+    }
+    pe_rows = (await db.execute(
+        _dr(select(PromotionalExpense.category, func.coalesce(func.sum(PromotionalExpense.amount), 0)),
+            PromotionalExpense.created_at).group_by(PromotionalExpense.category)
+    )).all()
+    promo_expense_sources = sorted(
+        [
+            {
+                "key": (cat or "manual"),
+                "label": _PE_LABELS.get(cat, (cat or "manual").replace("_", " ").title()),
+                "amount": round(float(amt or 0), 2),
+            }
+            for cat, amt in pe_rows
+        ],
+        key=lambda x: x["amount"], reverse=True,
+    )
+    promo_expense_total = round(sum(s["amount"] for s in promo_expense_sources), 2)
+
     return {
         "net_pnl": {"total": net_pnl_total, "sources": pnl_sources},
+        "promotional_expenses": {"total": promo_expense_total, "sources": promo_expense_sources},
         "deposits": {"total": dep_total, "by_method": dep_methods},
         "withdrawals": {"total": wd_total, "by_method": wd_methods},
         "net_credit": {
@@ -438,6 +582,9 @@ async def finance_overview(db: AsyncSession, start_date=None, end_date=None) -> 
             "accrued_unpaid": round(max(0.0, fr_accrued - fr_interest_paid), 2),
             "by_tenure": fr_by_tenure,
             "maturing": fr_maturing,
+            # Per-user interest generated + per-user staking referral commission.
+            "by_user": fr_by_user,
+            "referral_commission": fr_referral_commission,
         },
         "pending_deposits": {"total": pdep_total, "by_method": pdep_methods},
         "pending_withdrawals": {"total": pwd_total, "by_method": pwd_methods},
@@ -486,6 +633,30 @@ async def finance_overview_drill(
             q = q.where(col <= end_date)
         return q
 
+    # Same promo + demo exclusion as the overview cards, so the per-user drill
+    # totals MATCH the source figures (client 2026-07-03 — drills were counting
+    # demo/promo users the cards excluded).
+    promo_user_ids = [r[0] for r in (await db.execute(
+        select(User.id).where(User.is_promotional == True)
+    )).all()]
+    promo_acct_ids = [r[0] for r in (await db.execute(
+        select(TradingAccount.id).where(TradingAccount.user_id.in_(promo_user_ids))
+    )).all()] if promo_user_ids else []
+    demo_acct_ids = [r[0] for r in (await db.execute(
+        select(TradingAccount.id).where(TradingAccount.is_demo == True)
+    )).all()]
+    demo_user_ids = [r[0] for r in (await db.execute(
+        select(User.id).where(User.is_demo == True)
+    )).all()]
+    excl_acct_ids = list(set(promo_acct_ids) | set(demo_acct_ids))
+    excl_user_ids = list(set(promo_user_ids) | set(demo_user_ids))
+
+    def _xa(q, col):
+        return q.where(col.notin_(excl_acct_ids)) if excl_acct_ids else q
+
+    def _xu(q, col):
+        return q.where(col.notin_(excl_user_ids)) if excl_user_ids else q
+
     if section in ("deposits", "pending_deposits", "withdrawals", "pending_withdrawals"):
         if section.endswith("deposits"):
             model = Deposit
@@ -499,7 +670,9 @@ async def finance_overview_drill(
         )
         if method and method != "all":
             q = q.where(func.coalesce(model.method, "other") == method)
-        q = _dr(q, model.created_at).group_by(model.user_id)
+        # Exclude by USER (deposits/withdrawals are wallet-scoped, account_id is
+        # NULL) so the drill matches the card and NULL rows aren't dropped.
+        q = _xu(_dr(q, model.created_at), model.user_id).group_by(model.user_id)
         rows = (await db.execute(q)).all()
         umap = await _user_label_map(db, [r[0] for r in rows if r[0]])
         for uid, amt, cnt in rows:
@@ -516,12 +689,12 @@ async def finance_overview_drill(
         # Per-user bonus wallet + account credit (the two tradable-but-not-
         # withdrawable pools shown in the Net Credit card).
         bonus_rows = (await db.execute(
-            select(User.id, func.coalesce(User.main_wallet_bonus, 0))
-            .where(func.coalesce(User.main_wallet_bonus, 0) != 0)
+            _xu(select(User.id, func.coalesce(User.main_wallet_bonus, 0))
+                .where(func.coalesce(User.main_wallet_bonus, 0) != 0), User.id)
         )).all()
         credit_rows = (await db.execute(
-            select(TradingAccount.user_id, func.coalesce(func.sum(TradingAccount.credit), 0))
-            .where(TradingAccount.credit != 0)
+            _xa(select(TradingAccount.user_id, func.coalesce(func.sum(TradingAccount.credit), 0))
+                .where(TradingAccount.credit != 0), TradingAccount.id)
             .group_by(TradingAccount.user_id)
         )).all()
         acc: dict = {}
@@ -546,7 +719,7 @@ async def finance_overview_drill(
         q = select(FixedReturnLock).where(FixedReturnLock.state.in_(["active", "early_pending"]))
         if tenure:
             q = q.where(FixedReturnLock.tenure_label == tenure)
-        q = _dr(q, FixedReturnLock.locked_at)
+        q = _xu(_dr(q, FixedReturnLock.locked_at), FixedReturnLock.user_id)
         locks = (await db.execute(q)).scalars().all()
         acc: dict = {}
         for lk in locks:
@@ -574,14 +747,14 @@ async def finance_overview_drill(
         # TradeHistory.user_id directly raised an AttributeError → HTTP 500 on
         # this drill.
         rows = (await db.execute(
-            _dr(
+            _xa(_dr(
                 select(
                     TradingAccount.user_id,
                     func.coalesce(func.sum(TradeHistory.profit), 0),
                     func.count(TradeHistory.id),
                 ).join(TradingAccount, TradingAccount.id == TradeHistory.account_id),
                 TradeHistory.closed_at,
-            ).group_by(TradingAccount.user_id)
+            ), TradeHistory.account_id).group_by(TradingAccount.user_id)
         )).all()
         umap = await _user_label_map(db, [r[0] for r in rows if r[0]])
         for uid, profit, cnt in rows:
@@ -600,12 +773,12 @@ async def finance_overview_drill(
         # Position.user_id would raise → HTTP 500).
         col = Position.commission if section == "commission" else Position.swap
         rows = (await db.execute(
-            _dr(
+            _xa(_dr(
                 select(TradingAccount.user_id, func.coalesce(func.sum(col), 0), func.count(Position.id))
                 .join(TradingAccount, TradingAccount.id == Position.account_id)
                 .where(col != 0),
                 Position.created_at,
-            ).group_by(TradingAccount.user_id)
+            ), Position.account_id).group_by(TradingAccount.user_id)
         )).all()
         umap = await _user_label_map(db, [r[0] for r in rows if r[0]])
         for uid, amt, cnt in rows:
@@ -622,12 +795,12 @@ async def finance_overview_drill(
         # Spread revenue per user — from filled orders (orders.spread_revenue),
         # joined to trading_accounts for the owner (client 2026-06-16).
         rows = (await db.execute(
-            _dr(
+            _xa(_dr(
                 select(TradingAccount.user_id, func.coalesce(func.sum(Order.spread_revenue), 0), func.count(Order.id))
                 .join(TradingAccount, TradingAccount.id == Order.account_id)
                 .where(Order.status == "filled", Order.spread_revenue != 0),
                 Order.created_at,
-            ).group_by(TradingAccount.user_id)
+            ), Order.account_id).group_by(TradingAccount.user_id)
         )).all()
         umap = await _user_label_map(db, [r[0] for r in rows if r[0]])
         for uid, amt, cnt in rows:
@@ -640,19 +813,44 @@ async def finance_overview_drill(
                 "count": int(cnt or 0),
             })
 
-    elif section in ("pamm_mam", "insurance_fees", "insurance_payouts", "referral"):
+    elif section == "insurance_fees":
+        # Per-POLICY detail — each insured trade with the instrument it was on,
+        # its tier + coverage, and the exact fee. Answers "how much fee on what"
+        # instead of just a per-user total (client 2026-07-03).
+        from packages.common.src.models import InsurancePolicy
+        rows = (await db.execute(
+            _xu(_dr(
+                select(
+                    InsurancePolicy.user_id, InsurancePolicy.fee, InsurancePolicy.tier,
+                    InsurancePolicy.coverage_pct, Instrument.symbol,
+                ).join(Instrument, Instrument.id == InsurancePolicy.instrument_id),
+                InsurancePolicy.activated_at,
+            ), InsurancePolicy.user_id).order_by(InsurancePolicy.activated_at.desc())
+        )).all()
+        umap = await _user_label_map(db, [r[0] for r in rows if r[0]])
+        for uid, fee, tier, cov, symbol in rows:
+            info = umap.get(uid, {})
+            uname = info.get("name", "—")
+            users.append({
+                "user_id": str(uid) if uid else None,
+                "name": f"{uname} · {symbol} · {tier} ({float(cov or 0):.0f}%)",
+                "email": info.get("email"),
+                "amount": round(abs(float(fee or 0)), 2),
+                "count": 1,
+            })
+
+    elif section in ("pamm_mam", "insurance_payouts", "referral"):
         type_map = {
             "pamm_mam": ["admin_commission"],
-            "insurance_fees": ["insurance_fee"],
             "insurance_payouts": ["insurance_payout"],
             "referral": ["referral_commission", "ib_referral_bounty"],
         }
         rows = (await db.execute(
-            _dr(
+            _xu(_dr(
                 select(Transaction.user_id, func.coalesce(func.sum(Transaction.amount), 0), func.count(Transaction.id))
                 .where(Transaction.type.in_(type_map[section])),
                 Transaction.created_at,
-            ).group_by(Transaction.user_id)
+            ), Transaction.user_id).group_by(Transaction.user_id)
         )).all()
         umap = await _user_label_map(db, [r[0] for r in rows if r[0]])
         for uid, amt, cnt in rows:
@@ -668,11 +866,11 @@ async def finance_overview_drill(
     elif section == "ib_commission":
         # IBCommission.ib_id → ib_profiles.id → user. Group by the IB's user.
         rows = (await db.execute(
-            _dr(
+            _xu(_dr(
                 select(IBProfile.user_id, func.coalesce(func.sum(IBCommission.amount), 0), func.count(IBCommission.id))
                 .join(IBProfile, IBProfile.id == IBCommission.ib_id),
                 IBCommission.created_at,
-            ).group_by(IBProfile.user_id)
+            ), IBProfile.user_id).group_by(IBProfile.user_id)
         )).all()
         umap = await _user_label_map(db, [r[0] for r in rows if r[0]])
         for uid, amt, cnt in rows:
@@ -680,6 +878,26 @@ async def finance_overview_drill(
             users.append({
                 "user_id": str(uid) if uid else None,
                 "name": info.get("name", "—"),
+                "email": info.get("email"),
+                "amount": round(abs(float(amt or 0)), 2),
+                "count": int(cnt or 0),
+            })
+
+    elif section == "promotional_expenses":
+        # Per-user total from the promotional_expenses ledger only (override
+        # extras + manual entries) — same source as the card.
+        rows = (await db.execute(
+            _dr(select(PromotionalExpense.user_id,
+                       func.coalesce(func.sum(PromotionalExpense.amount), 0),
+                       func.count(PromotionalExpense.id)),
+                PromotionalExpense.created_at).group_by(PromotionalExpense.user_id)
+        )).all()
+        umap = await _user_label_map(db, [r[0] for r in rows if r[0]])
+        for uid, amt, cnt in rows:
+            info = umap.get(uid, {})
+            users.append({
+                "user_id": str(uid) if uid else None,
+                "name": (info.get("name", "—") if uid else "General (no user)"),
                 "email": info.get("email"),
                 "amount": round(abs(float(amt or 0)), 2),
                 "count": int(cnt or 0),
@@ -700,6 +918,68 @@ async def finance_overview_drill(
         "sort": sort,
         "users": users,
         "total": round(sum(u["amount"] for u in users), 2),
+    }
+
+
+# ── Promotional Expenses — manual entries ─────────────────────────────────
+
+async def add_promotional_expense(
+    db: AsyncSession, *, admin_id, amount, category: str | None,
+    note: str | None, user_id=None,
+) -> dict:
+    """Log a manual promotional give-away (money the broker gave for promotion
+    that has no other ledger row). Admin-only; recorded in promotional_expenses
+    and surfaced in the Promotional Expenses card total."""
+    from dependencies import write_audit_log
+    try:
+        amt = Decimal(str(amount))
+    except (InvalidOperation, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid amount")
+    if amt <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be greater than zero")
+
+    row = PromotionalExpense(
+        user_id=user_id,
+        amount=amt,
+        category=((category or "manual").strip() or "manual")[:40],
+        note=(note or None),
+        created_by=admin_id,
+    )
+    db.add(row)
+    await db.flush()
+    await write_audit_log(
+        db, admin_id, "promo_expense_add", "promotional_expense", row.id,
+        new_values={
+            "amount": str(amt), "category": row.category,
+            "user_id": str(user_id) if user_id else None, "note": note,
+        },
+    )
+    await db.commit()
+    return {"id": str(row.id), "amount": float(row.amount), "category": row.category}
+
+
+async def list_promotional_expenses(db: AsyncSession, *, limit: int = 100) -> dict:
+    """Recent manual promotional-expense entries (for the card's manual list)."""
+    rows = (await db.execute(
+        select(PromotionalExpense)
+        .order_by(PromotionalExpense.created_at.desc())
+        .limit(max(1, min(limit, 500)))
+    )).scalars().all()
+    umap = await _user_label_map(db, [r.user_id for r in rows if r.user_id])
+    return {
+        "items": [
+            {
+                "id": str(r.id),
+                "user_id": str(r.user_id) if r.user_id else None,
+                "user_name": (umap.get(r.user_id, {}).get("name") if r.user_id else None),
+                "user_email": (umap.get(r.user_id, {}).get("email") if r.user_id else None),
+                "amount": float(r.amount or 0),
+                "category": r.category,
+                "note": r.note,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ]
     }
 
 

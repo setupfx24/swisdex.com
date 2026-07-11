@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from packages.common.src.models import (
     BankAccount, BonusOffer, Deposit, Transaction, TradingAccount, User, UserBonus, Withdrawal,
+    AccountGroup,
 )
 from packages.common.src.notify import create_notification
 from packages.common.src.config import get_settings
@@ -306,9 +307,29 @@ async def _get_bank_for_tier(amount: Decimal, db: AsyncSession) -> BankAccount |
     return bank
 
 
+# ─── KYC gate ─────────────────────────────────────────────────────────────
+
+async def _require_kyc_approved(user_id: UUID, db: AsyncSession) -> None:
+    """Block deposits AND withdrawals until the user's KYC is approved
+    (client 2026-06-24: "no deposit and withdrawal without KYC verification").
+    Raises 403 otherwise. Demo flows never call money endpoints, so this only
+    affects real funding."""
+    from packages.common.src.models import User as _KycUser
+    row = (await db.execute(
+        select(_KycUser.kyc_status).where(_KycUser.id == user_id)
+    )).first()
+    status = ((row[0] if row else "") or "").lower()
+    if status not in ("approved", "verified"):
+        raise HTTPException(
+            status_code=403,
+            detail="Complete your KYC verification before you can deposit or withdraw.",
+        )
+
+
 # ─── Deposits ─────────────────────────────────────────────────────────────
 
 async def create_deposit(req, user_id: UUID, db: AsyncSession) -> dict:
+    await _require_kyc_approved(user_id, db)
     from packages.common.src.settings_store import get_bool_setting, get_float_setting
     if await get_bool_setting("maintenance_mode", False):
         raise HTTPException(status_code=503, detail="Platform is under maintenance. Deposits are temporarily disabled.")
@@ -452,6 +473,7 @@ async def create_manual_deposit(
     db: AsyncSession,
     bonus_code: str | None = None,
 ) -> dict:
+    await _require_kyc_approved(user_id, db)
     from packages.common.src.settings_store import get_bool_setting, get_float_setting
     if not await get_bool_setting("allow_deposits", True):
         raise HTTPException(status_code=403, detail="Deposits are currently disabled")
@@ -601,7 +623,12 @@ async def handle_oxapay_webhook(
         deposit.status = "auto_approved"
         deposit.approved_at = datetime.utcnow()
 
-        user_q = await db.execute(select(User).where(User.id == deposit.user_id))
+        # Lock the user row so two deposits settling concurrently for the same
+        # user can't both read a stale main_wallet_balance and lose an update
+        # (the admin approve path already locks; the webhook path did not).
+        user_q = await db.execute(
+            select(User).where(User.id == deposit.user_id).with_for_update()
+        )
         user_row = user_q.scalar_one_or_none()
         if not user_row:
             logger.error("OxaPay webhook: user not found for deposit %s", order_id)
@@ -789,6 +816,7 @@ async def create_wallet_deposit(
     wallet-connect flow. Returns the address + exact crypto amount the
     frontend renders. No payment_url — user pays from their connected
     wallet directly. Settlement still gates on the IPN webhook."""
+    await _require_kyc_approved(user_id, db)
     from packages.common.src.settings_store import get_bool_setting
     if await get_bool_setting("maintenance_mode", False):
         raise HTTPException(status_code=503, detail="Platform is under maintenance.")
@@ -986,7 +1014,12 @@ async def handle_nowpayments_webhook(
         deposit.status = "auto_approved"
         deposit.approved_at = datetime.utcnow()
 
-        user_q = await db.execute(select(User).where(User.id == deposit.user_id))
+        # Lock the user row so two deposits settling concurrently for the same
+        # user can't both read a stale main_wallet_balance and lose an update
+        # (the admin approve path already locks; the webhook path did not).
+        user_q = await db.execute(
+            select(User).where(User.id == deposit.user_id).with_for_update()
+        )
         user_row = user_q.scalar_one_or_none()
         if not user_row:
             logger.error("NOWPayments webhook: user not found for deposit %s", order_id)
@@ -1157,7 +1190,137 @@ async def handle_nowpayments_webhook(
 
 # ─── Withdrawals ──────────────────────────────────────────────────────────
 
+def _parse_crypto_payout(withdrawal: Withdrawal) -> tuple[str | None, str | None]:
+    """Extract (asset_id, address) from a crypto withdrawal's stored details.
+    The trader form stores '[ASSET] address' in bank_details.oxapay_payout."""
+    raw = ""
+    bd = withdrawal.bank_details
+    if isinstance(bd, dict):
+        raw = str(bd.get("oxapay_payout") or bd.get("nowpayments_payout") or "").strip()
+    if not raw and withdrawal.crypto_address:
+        raw = str(withdrawal.crypto_address).strip()
+    if not raw:
+        return None, None
+    if raw.startswith("[") and "]" in raw:
+        asset = raw[1:raw.index("]")].strip()
+        address = raw[raw.index("]") + 1:].strip()
+        return (asset or None), (address or None)
+    return None, raw
+
+
+async def _send_nowpayments_payout(
+    withdrawal: Withdrawal, user_row: User, db: AsyncSession
+) -> bool:
+    """Send the NOWPayments crypto payout for an ALREADY-DEBITED withdrawal.
+
+    On success → status 'processing' (+ payout_batch_id). On ANY failure →
+    re-credit the wallet (reversal Transaction) + status 'failed' + notify, so
+    the user never loses money. Never raises — returns True/False; caller commits.
+    """
+    from . import nowpayments_service
+    asset, address = _parse_crypto_payout(withdrawal)
+    np_currency = nowpayments_service.resolve_currency(asset) if asset else None
+
+    async def _refund(reason: str) -> None:
+        user_row.main_wallet_balance = (user_row.main_wallet_balance or Decimal("0")) + withdrawal.amount
+        db.add(Transaction(
+            user_id=withdrawal.user_id, account_id=None, type="withdrawal",
+            amount=withdrawal.amount, balance_after=user_row.main_wallet_balance,
+            reference_id=withdrawal.id, description="Auto-withdrawal failed — refunded to wallet",
+        ))
+        withdrawal.status = "failed"
+        withdrawal.rejection_reason = reason[:500]
+        try:
+            await create_notification(
+                db, withdrawal.user_id, title="Withdrawal Refunded",
+                message=f"Your ${float(withdrawal.amount):,.2f} crypto withdrawal could not be sent and was refunded to your wallet.",
+                notif_type="withdrawal", action_url="/wallet",
+            )
+        except Exception:
+            pass
+
+    if not address or not np_currency:
+        await _refund("Auto-payout unavailable: missing or unrecognised crypto address/asset")
+        return False
+    try:
+        crypto_amt = await nowpayments_service.estimate_crypto_amount(withdrawal.amount, np_currency)
+        result = await nowpayments_service.create_payout(
+            address=address, np_currency=np_currency, crypto_amount=crypto_amt,
+            order_id=str(withdrawal.id),
+        )
+        withdrawal.payout_batch_id = result.get("batch_id")
+        withdrawal.status = "processing"
+        withdrawal.approved_at = datetime.utcnow()
+        return True
+    except Exception as e:
+        logger.error("NOWPayments auto-payout failed for withdrawal %s: %s", withdrawal.id, e)
+        await _refund(f"Payout error: {e}")
+        return False
+
+
+async def handle_nowpayments_payout_webhook(
+    *, batch_id: str, status: str, payload: dict, db: AsyncSession
+) -> None:
+    """Update an auto crypto withdrawal from its NOWPayments payout IPN.
+
+    finished → 'completed' (+ tx hash). failed/rejected/expired → 'failed' and
+    refund the wallet ONCE. Other states (waiting/sending) leave it 'processing'.
+    Idempotent: terminal withdrawals are skipped.
+    """
+    w = (await db.execute(
+        select(Withdrawal).where(Withdrawal.payout_batch_id == batch_id)
+    )).scalars().first()
+    if not w:
+        logger.info("Payout IPN for unknown batch %s — ignoring", batch_id)
+        return
+    cur = (w.status or "").lower()
+    if cur in ("completed", "failed", "rejected"):
+        return  # already terminal
+
+    s = (status or "").lower()
+    if s == "finished":
+        w.status = "completed"
+        w.completed_at = datetime.utcnow()
+        h = payload.get("hash") or payload.get("transaction_hash")
+        if h:
+            w.crypto_tx_hash = str(h)[:200]
+        try:
+            await create_notification(
+                db, w.user_id, title="Withdrawal Completed",
+                message=f"Your ${float(w.amount):,.2f} crypto withdrawal has been sent.",
+                notif_type="withdrawal", action_url="/wallet",
+            )
+        except Exception:
+            pass
+        await db.commit()
+    elif s in ("failed", "rejected", "expired"):
+        # Refund the wallet once (the amount was debited when the payout was sent).
+        user_row = (await db.execute(
+            select(User).where(User.id == w.user_id).with_for_update()
+        )).scalar_one_or_none()
+        if user_row:
+            user_row.main_wallet_balance = (user_row.main_wallet_balance or Decimal("0")) + w.amount
+            db.add(Transaction(
+                user_id=w.user_id, account_id=None, type="withdrawal",
+                amount=w.amount, balance_after=user_row.main_wallet_balance,
+                reference_id=w.id, description="Crypto payout failed — refunded to wallet",
+            ))
+        w.status = "failed"
+        w.rejection_reason = f"Payout {s}"[:500]
+        try:
+            await create_notification(
+                db, w.user_id, title="Withdrawal Failed",
+                message=f"Your ${float(w.amount):,.2f} crypto withdrawal could not be sent and was refunded to your wallet.",
+                notif_type="withdrawal", action_url="/wallet",
+            )
+        except Exception:
+            pass
+        await db.commit()
+    # else: in-flight (waiting/processing/sending) → keep 'processing'
+
+
 async def create_withdrawal(req, user_id: UUID, db: AsyncSession) -> dict:
+    await _require_kyc_approved(user_id, db)
     from packages.common.src.settings_store import get_bool_setting, get_float_setting
     if await get_bool_setting("maintenance_mode", False):
         raise HTTPException(status_code=503, detail="Platform is under maintenance. Withdrawals are temporarily disabled.")
@@ -1188,11 +1351,12 @@ async def create_withdrawal(req, user_id: UUID, db: AsyncSession) -> dict:
             ),
         )
 
+    method_norm = METHOD_MAP.get(req.method, "bank_transfer")
     withdrawal = Withdrawal(
         user_id=user_id,
         account_id=None,
         amount=req.amount,
-        method=METHOD_MAP.get(req.method, "bank_transfer"),
+        method=method_norm,
         bank_details=getattr(req, "bank_details", None),
         crypto_address=getattr(req, "crypto_address", None),
         status="pending",
@@ -1200,6 +1364,48 @@ async def create_withdrawal(req, user_id: UUID, db: AsyncSession) -> dict:
     db.add(withdrawal)
     await db.commit()
     await db.refresh(withdrawal)
+
+    # ── Auto crypto withdrawal (client 2026-06-22): crypto withdrawals at or
+    # below crypto_auto_withdrawal_max_usd are paid out automatically via
+    # NOWPayments; larger ones stay 'pending' for admin approval. ──
+    from . import nowpayments_service as _np
+    is_crypto = method_norm in ("oxapay", "nowpayments", "crypto_btc", "crypto_eth", "crypto_usdt", "metamask")
+    auto_max = float(await get_float_setting("crypto_auto_withdrawal_max_usd", 0.0))
+    auto_eligible = (
+        is_crypto
+        and await get_bool_setting("crypto_auto_withdrawal_enabled", False)
+        and auto_max > 0
+        and float(req.amount) <= auto_max
+        and _np.payouts_configured()
+    )
+    if auto_eligible:
+        locked = (await db.execute(
+            select(User).where(User.id == user_id).with_for_update()
+        )).scalar_one_or_none()
+        bal = (locked.main_wallet_balance or Decimal("0")) if locked else Decimal("0")
+        if locked and bal >= withdrawal.amount:
+            # Debit now (no admin step), then send the payout.
+            locked.main_wallet_balance = bal - withdrawal.amount
+            db.add(Transaction(
+                user_id=user_id, account_id=None, type="withdrawal",
+                amount=-withdrawal.amount, balance_after=locked.main_wallet_balance,
+                reference_id=withdrawal.id, description=f"Auto crypto withdrawal - {req.method}",
+            ))
+            ok = await _send_nowpayments_payout(withdrawal, locked, db)
+            await db.commit()
+            await db.refresh(withdrawal)
+            if ok:
+                try:
+                    await create_notification(
+                        db, user_id, title="Withdrawal Processing",
+                        message=f"${float(withdrawal.amount):,.2f} crypto withdrawal is being sent automatically.",
+                        notif_type="withdrawal", action_url="/wallet",
+                    )
+                    await db.commit()
+                except Exception:
+                    pass
+            return {"id": str(withdrawal.id), "status": withdrawal.status, "amount": float(withdrawal.amount)}
+        # balance changed under us → fall through to the manual pending flow
 
     await create_notification(
         db, user_id,
@@ -1250,6 +1456,7 @@ async def create_manual_withdrawal(
     file: UploadFile | None,
     db: AsyncSession,
 ) -> dict:
+    await _require_kyc_approved(user_id, db)
     from packages.common.src.settings_store import get_bool_setting, get_float_setting
     if not await get_bool_setting("allow_withdrawals", True):
         raise HTTPException(status_code=403, detail="Withdrawals are currently disabled")
@@ -1361,22 +1568,22 @@ async def internal_wallet_transfer(req, user_id: UUID, db: AsyncSession) -> dict
     if req.from_account_id == req.to_account_id:
         raise HTTPException(status_code=400, detail="Choose two different accounts")
 
-    fq = await db.execute(
+    # Lock BOTH account rows FOR UPDATE before the free-balance check and the
+    # read-modify-write below, mirroring transfer_trading_to_main (audit
+    # finding C2). Without this, two concurrent transfers out of the same
+    # source each read the stale source balance and each credits its
+    # destination in full — minting money. Lock in a deterministic id order
+    # so two opposite-direction transfers can't deadlock.
+    rows = (await db.execute(
         select(TradingAccount).where(
-            TradingAccount.id == req.from_account_id,
+            TradingAccount.id.in_([req.from_account_id, req.to_account_id]),
             TradingAccount.user_id == user_id,
             TradingAccount.is_demo == False,
-        )
-    )
-    from_a = fq.scalar_one_or_none()
-    tq = await db.execute(
-        select(TradingAccount).where(
-            TradingAccount.id == req.to_account_id,
-            TradingAccount.user_id == user_id,
-            TradingAccount.is_demo == False,
-        )
-    )
-    to_a = tq.scalar_one_or_none()
+        ).order_by(TradingAccount.id).with_for_update()
+    )).scalars().all()
+    by_id = {a.id: a for a in rows}
+    from_a = by_id.get(req.from_account_id)
+    to_a = by_id.get(req.to_account_id)
     if not from_a or not to_a:
         raise HTTPException(status_code=404, detail="Account not found")
 
@@ -1460,14 +1667,21 @@ async def transfer_trading_to_main(req, user_id: UUID, db: AsyncSession) -> dict
         )
 
     free = (account.balance or Decimal("0")) - (account.margin_used or Decimal("0"))
-    if free < amt:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Insufficient available balance on this trading account. "
-                f"Available: ${float(free):.2f} (${float(account.margin_used or 0):.2f} locked in open trades)."
-            ),
-        )
+    # The UI's "Max" fills the 2-decimal DISPLAY value, which can round a hair
+    # above the true free balance (e.g. 16694.4599 shown as 16694.46) and trip
+    # a strict `free < amt`. Treat a within-1-cent overshoot as "transfer all"
+    # and clamp to the exact free balance (client 2026-06-26).
+    if amt > free:
+        if amt - free <= Decimal("0.01"):
+            amt = free
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Insufficient available balance on this trading account. "
+                    f"Available: ${float(free):.2f} (${float(account.margin_used or 0):.2f} locked in open trades)."
+                ),
+            )
 
     user_q = await db.execute(
         select(User).where(User.id == user_id).with_for_update()
@@ -1477,6 +1691,35 @@ async def transfer_trading_to_main(req, user_id: UUID, db: AsyncSession) -> dict
         raise HTTPException(status_code=404, detail="User not found")
 
     account.balance = (account.balance or Decimal("0")) - amt
+
+    # Credit rule (client 2026-06-24): bonus / admin credit is tradable but must
+    # stay "backed" by real balance — the user must keep at least `credit` worth
+    # of balance in the account. If THIS transfer drops the balance below the
+    # credit, they've pulled their real money out from under the bonus, so the
+    # bonus credit is forfeited in full. Insurance-claim credit is EARNED money
+    # (the user paid the insurance fee) and survives — same protection as the
+    # first-withdrawal forfeiture.
+    cur_credit = account.credit or Decimal("0")
+    if cur_credit > 0 and account.balance < cur_credit:
+        insurance_credit = Decimal(str((await db.execute(
+            select(func.coalesce(func.sum(Transaction.amount), 0)).where(
+                Transaction.account_id == account.id,
+                Transaction.type == "insurance_payout",
+            )
+        )).scalar() or 0))
+        protected = min(cur_credit, max(Decimal("0"), insurance_credit))
+        forfeited = cur_credit - protected
+        if forfeited > 0:
+            account.credit = protected
+            db.add(Transaction(
+                user_id=user_id, account_id=account.id, type="bonus_forfeited",
+                amount=-forfeited, balance_after=account.balance,
+                description=(
+                    f"Bonus credit forfeited — balance dropped below credit on "
+                    f"transfer to main wallet (${float(forfeited):.2f})"
+                ),
+            ))
+
     account.equity = account.balance + (account.credit or Decimal("0"))
     account.free_margin = account.equity - (account.margin_used or Decimal("0"))
 
@@ -1660,7 +1903,21 @@ async def list_transactions(user_id: UUID, account_id: UUID | None, db: AsyncSes
             raise HTTPException(status_code=404, detail="Account not found")
         query = select(Transaction).where(Transaction.account_id == account_id)
     else:
-        query = select(Transaction).where(Transaction.user_id == user_id)
+        # Aggregate ("all") view must NOT mix in demo-account activity — demo
+        # trades (P&L / commission / swap ledger rows) were leaking into the
+        # real transaction history. Keep main-wallet rows (NULL account_id) and
+        # real-account rows; drop anything tied to a demo account (2026-06-25).
+        demo_acct_ids = select(TradingAccount.id).where(
+            TradingAccount.user_id == user_id,
+            TradingAccount.is_demo == True,  # noqa: E712
+        )
+        query = select(Transaction).where(
+            Transaction.user_id == user_id,
+            or_(
+                Transaction.account_id.is_(None),
+                Transaction.account_id.notin_(demo_acct_ids),
+            ),
+        )
 
     query = query.order_by(Transaction.created_at.desc()).limit(500)
     result = await db.execute(query)
@@ -1735,6 +1992,15 @@ async def wallet_summary(user_id: UUID, account_id: UUID | None, db: AsyncSessio
     )
     live_list = list(acct_q.scalars().all())
 
+    # Cent-account flag per account so the wallet UI can render ¢ balances and
+    # convert ¢→USD on transfer (client 2026-06-23).
+    cent_rows = (await db.execute(
+        select(TradingAccount.id, AccountGroup.is_cent_account)
+        .join(AccountGroup, AccountGroup.id == TradingAccount.account_group_id, isouter=True)
+        .where(TradingAccount.id.in_([a.id for a in live_list]))
+    )).all() if live_list else []
+    cent_map = {str(aid): bool(ic) for aid, ic in cent_rows}
+
     live_accounts_payload = [
         {
             "id": str(a.id),
@@ -1744,6 +2010,7 @@ async def wallet_summary(user_id: UUID, account_id: UUID | None, db: AsyncSessio
             "margin_used": float(a.margin_used or 0),
             "currency": a.currency or "USD",
             "free_margin": float((a.balance or Decimal("0")) - (a.margin_used or Decimal("0"))),
+            "is_cent_account": cent_map.get(str(a.id), False),
         }
         for a in live_list
     ]

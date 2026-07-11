@@ -4,7 +4,7 @@ import { useEffect, useState, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import AdminSidebar from './AdminSidebar';
 import { useAuthStore } from '@/stores/authStore';
-import { Search, User, LogOut, Loader2 } from 'lucide-react';
+import { User, LogOut, Loader2 } from 'lucide-react';
 import ThemeToggle from '@/components/ThemeToggle';
 import AdminNotificationBell from '@/components/notifications/AdminNotificationBell';
 import { useAuthRehydrated } from '@/hooks/useAuthRehydrated';
@@ -80,14 +80,6 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
       <div className="flex-1 flex flex-col overflow-hidden">
         {/* Top bar — glass effect */}
         <div className="flex items-center h-14 px-5 glass border-b border-border-primary/30">
-          <div className="relative flex-1 max-w-md">
-            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-tertiary" />
-            <input
-              type="text"
-              placeholder="Search users, trades..."
-              className="w-full pl-9 pr-3 py-2 text-xs bg-bg-primary/60 border border-border-primary/50 rounded-lg backdrop-blur-sm"
-            />
-          </div>
           <div className="ml-auto flex items-center gap-3">
             <AdminNotificationBell />
             <ThemeToggle />

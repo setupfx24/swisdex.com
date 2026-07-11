@@ -21,6 +21,8 @@ interface AccountType {
   is_active: boolean;
   // Per-account-type Trade Insurance gate (Mig 0070).
   insurance_enabled: boolean;
+  is_cent_account: boolean;
+  lot_size_multiplier: number;
 }
 
 const EMPTY = {
@@ -36,6 +38,8 @@ const EMPTY = {
   is_demo: false,
   is_active: true,
   insurance_enabled: true,
+  is_cent_account: false,
+  lot_size_multiplier: '1',
 };
 
 export default function AccountTypesPage() {
@@ -83,6 +87,8 @@ export default function AccountTypesPage() {
       is_demo: r.is_demo,
       is_active: r.is_active,
       insurance_enabled: r.insurance_enabled ?? true,
+      is_cent_account: r.is_cent_account ?? false,
+      lot_size_multiplier: String(r.lot_size_multiplier ?? 1),
     });
     setModal(true);
   };
@@ -109,6 +115,8 @@ export default function AccountTypesPage() {
         is_demo: form.is_demo,
         is_active: form.is_active,
         insurance_enabled: form.insurance_enabled,
+        is_cent_account: form.is_cent_account,
+        lot_size_multiplier: Number(form.lot_size_multiplier) || 1,
       };
       if (editId) {
         await adminApi.put(`/account-types/${editId}`, body);
@@ -341,6 +349,23 @@ export default function AccountTypesPage() {
                 Trade Insurance available
                 <span className="text-text-tertiary">— traders on this type can insure trades</span>
               </label>
+              <label className="flex items-center gap-2 text-xs text-text-secondary">
+                <input type="checkbox" checked={form.is_cent_account} onChange={(e) => u('is_cent_account', e.target.checked)} />
+                Cent account
+                <span className="text-text-tertiary">— balances shown in ¢ (×100)</span>
+              </label>
+              {form.is_cent_account && (
+                <div className="flex items-center gap-2 text-xs text-text-secondary pl-6">
+                  <span>Lot size multiplier</span>
+                  <input
+                    type="number" step="0.01" min="0"
+                    value={form.lot_size_multiplier}
+                    onChange={(e) => u('lot_size_multiplier', e.target.value)}
+                    className="w-24 text-xs py-1 px-2 bg-bg-input border border-border-primary rounded-md font-mono"
+                  />
+                  <span className="text-text-tertiary">— e.g. 0.01 = 1 cent-lot is 1/100 of a standard lot</span>
+                </div>
+              )}
               <label className="flex items-center gap-2 text-xs text-text-secondary">
                 <input type="checkbox" checked={form.is_demo} onChange={(e) => u('is_demo', e.target.checked)} />
                 Demo type

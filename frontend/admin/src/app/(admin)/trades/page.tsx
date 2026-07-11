@@ -18,6 +18,8 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
+import { Download as DownloadIcon } from 'lucide-react';
+import { downloadAdminReportPdf } from '@/lib/pdf/adminReportPdf';
 
 interface Position {
   id: string;
@@ -477,6 +479,61 @@ export default function TradesPage() {
     );
   };
 
+  // Export the active tab (open positions or closed history) to PDF, with the
+  // date-range filter + total P&L summary (client 2026-06-20).
+  const exportTradesPdf = () => {
+    const period = (dateFrom || dateTo) ? `${dateFrom || 'start'} → ${dateTo || 'today'}` : 'All time';
+    if (activeTab === 'history') {
+      if (!history.length) return;
+      const totalPnl = history.reduce((s, t) => s + (Number(t.profit) || 0), 0);
+      void downloadAdminReportPdf(
+        'Closed trades report',
+        [
+          { header: 'Closed', width: 34 }, { header: 'User', width: 50 },
+          { header: 'Symbol', width: 22 }, { header: 'Side', width: 14 },
+          { header: 'Lots', width: 16, align: 'right', mono: true },
+          { header: 'Open', width: 22, align: 'right', mono: true },
+          { header: 'Close', width: 22, align: 'right', mono: true },
+          { header: 'P&L (USD)', width: 24, align: 'right', mono: true },
+        ],
+        history.map(t => [
+          (t.closed_at || '').replace('T', ' ').slice(0, 16), t.user_email || '—',
+          t.instrument_symbol, (t.side || '').toUpperCase(), String(t.lots),
+          String(t.open_price), String(t.close_price),
+          `$${(Number(t.profit) || 0).toFixed(2)}`,
+        ]),
+        {
+          subtitle: 'Closed trades', periodLabel: period,
+          summaryLines: [`Trades: ${history.length}`, `Total realized P&L: $${totalPnl.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`],
+          filename: 'closed-trades-report',
+        },
+      );
+    } else {
+      if (!positions.length) return;
+      const totalPnl = positions.reduce((s, p) => s + (Number(p.profit) || 0), 0);
+      void downloadAdminReportPdf(
+        'Open positions report',
+        [
+          { header: 'Opened', width: 34 }, { header: 'User', width: 50 },
+          { header: 'Symbol', width: 22 }, { header: 'Side', width: 14 },
+          { header: 'Lots', width: 16, align: 'right', mono: true },
+          { header: 'Open', width: 22, align: 'right', mono: true },
+          { header: 'P&L (USD)', width: 24, align: 'right', mono: true },
+        ],
+        positions.map(p => [
+          (p.created_at || '').replace('T', ' ').slice(0, 16), p.user_email || '—',
+          p.instrument_symbol, (p.side || '').toUpperCase(), String(p.lots),
+          String(p.open_price), `$${(Number(p.profit) || 0).toFixed(2)}`,
+        ]),
+        {
+          subtitle: 'Open positions', periodLabel: period,
+          summaryLines: [`Positions: ${positions.length}`, `Total floating P&L: $${totalPnl.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`],
+          filename: 'open-positions-report',
+        },
+      );
+    }
+  };
+
   return (
     <>
       <div className="p-6 space-y-4">
@@ -487,6 +544,14 @@ export default function TradesPage() {
             <p className="text-xxs text-text-tertiary mt-0.5">Positions, pending orders, and history</p>
           </div>
           <div className="flex items-center gap-2">
+            {(activeTab === 'open' || activeTab === 'history') && (
+              <button type="button" onClick={exportTradesPdf} className={cn(
+                'inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md border',
+                'bg-bg-secondary text-xs font-medium text-text-secondary border-border-primary transition-fast hover:bg-bg-hover hover:text-text-primary',
+              )} title="Download the current tab (with date filter) as PDF">
+                <DownloadIcon size={14} className="text-buy" /> Download PDF
+              </button>
+            )}
             <Link href="/trades/create" className={cn(
               'inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md border',
               'bg-bg-secondary text-xs font-medium text-text-secondary border-border-primary transition-fast hover:bg-bg-hover hover:text-text-primary',

@@ -3,6 +3,7 @@ import './globals.css';
 import { Suspense } from 'react';
 import { Toaster } from 'react-hot-toast';
 import { ThemeProvider } from '@/components/ThemeProvider';
+import NumberInputWheelGuard from '@/components/util/NumberInputWheelGuard';
 import MobileBottomNav from '@/components/layout/MobileBottomNav';
 import { AuthProvider } from '@/components/providers/AuthProvider';
 import GoogleAuthProvider from '@/components/providers/GoogleAuthProvider';
@@ -59,6 +60,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             <GoogleAuthProvider>
             <NotificationListener />
             <ProfileCompleteGate />
+            <NumberInputWheelGuard />
             {children}
             <Suspense fallback={null}>
               <MobileBottomNav />
@@ -67,6 +69,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               position="top-center"
               containerClassName="swisdex-toaster"
               gutter={10}
+              // Drop the stack below the sticky app header (~64px) so toasts
+              // don't overlap the Bonus / Affiliates / wallet pills up top.
+              containerStyle={{ top: 76, zIndex: 99999 }}
               toastOptions={{
                 duration: 2500,
                 className: 'swisdex-hot-toast',

@@ -2,7 +2,7 @@
 
 
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 
 import { clsx } from 'clsx';
 
@@ -54,9 +54,39 @@ export default function BusinessPage() {
 
   const [tab, setTab] = useState<TabId>('ib');
 
-  const tabIndex = TABS.findIndex((t) => t.id === tab);
+  // A Sub-IB does NOT run the IB Program — their dashboard is My Network (their
+  // normal invitees) + Sub-Broker (downline who became Sub-IB). Hide the IB
+  // Program tab for them (client 2026-06-26).
+  const [bizSubIb, setBizSubIb] = useState(false);
+  useEffect(() => {
+    // The IB dashboard is the source of truth for is_sub_ib (drives the
+    // "You're a Sub-IB" prompt); status carries ib_type. Check both so the IB
+    // Program tab hides regardless of which one resolves first.
+    Promise.allSettled([
+      api.get<{ ib_type?: string; is_sub_ib?: boolean }>('/business/status'),
+      api.get<{ ib_type?: string; is_sub_ib?: boolean }>('/business/ib/dashboard'),
+    ]).then((res) => {
+      const sub = res.some((r) =>
+        r.status === 'fulfilled' && (r.value?.is_sub_ib === true || r.value?.ib_type === 'sub_ib'),
+      );
+      setBizSubIb(sub);
+    });
+  }, []);
+
+  const visibleTabs = useMemo(
+    () => (bizSubIb ? TABS.filter((t) => t.id !== 'ib') : TABS),
+    [bizSubIb],
+  );
+  // Keep the active tab valid for the visible set (Sub-IB default = Sub-Broker).
+  useEffect(() => {
+    if (!visibleTabs.some((t) => t.id === tab)) setTab(visibleTabs[0]?.id ?? 'network');
+  }, [visibleTabs, tab]);
+
+  const tabIndex = visibleTabs.findIndex((t) => t.id === tab);
 
   const slideIndex = tabIndex >= 0 ? tabIndex : 0;
+
+  const tabCount = visibleTabs.length || 1;
 
   if (isDemo) {
     return (
@@ -107,9 +137,9 @@ export default function BusinessPage() {
 
                 <div
 
-                  className="absolute top-0 h-full w-1/3 transition-[transform] duration-500 ease-[cubic-bezier(0.34,1.45,0.64,1)] will-change-transform"
+                  className="absolute top-0 h-full transition-[transform] duration-500 ease-[cubic-bezier(0.34,1.45,0.64,1)] will-change-transform"
 
-                  style={{ transform: `translate3d(${slideIndex * 100}%,0,0)` }}
+                  style={{ width: `${100 / tabCount}%`, transform: `translate3d(${slideIndex * 100}%,0,0)` }}
 
                 >
 
@@ -129,7 +159,7 @@ export default function BusinessPage() {
 
               </div>
 
-              {TABS.map((t) => {
+              {visibleTabs.map((t) => {
 
                 const active = tab === t.id;
 
@@ -286,6 +316,30 @@ function IBTab() {
 
 
 
+  // Deeper users (introduced by another IB, not the Super IB) can't apply as a
+  // full IB — they self-apply as a Sub-IB instead. On approval they're linked
+  // under their introducing IB and earn per-lot MLM commission on their own
+  // downline (client 2026-06-29).
+  const handleApplySubIb = async () => {
+
+    setApplying(true);
+
+    try {
+
+      await api.post('/business/apply-sub-broker', {});
+
+      toast.success('Sub-IB application submitted!');
+
+      const s = await api.get<any>('/business/status');
+
+      setStatus(s);
+
+    } catch (e: any) { toast.error(e.message || 'Failed'); } finally { setApplying(false); }
+
+  };
+
+
+
   if (loading) return <Spinner />;
 
 
@@ -300,7 +354,7 @@ function IBTab() {
 
         <h3 className="text-sm font-semibold text-text-primary">Application Pending</h3>
 
-        <p className="text-xxs text-text-tertiary mt-1">Your IB application is under review by the admin team.</p>
+        <p className="text-xxs text-text-tertiary mt-1">Your application is under review by the admin team.</p>
 
       </div>
 
@@ -316,33 +370,92 @@ function IBTab() {
     // self-apply. A user introduced by another IB/affiliate sees ONLY a
     // "Contact SwisDex to become an IB" prompt — no self-apply / eligibility.
     if (status?.can_become_ib === false) {
+      // Introduced by another IB (not the Super IB) → can't apply as a full IB,
+      // but CAN self-apply as a Sub-IB. On approval they're linked under their
+      // introducing IB and earn per-lot MLM commission on their own downline
+      // (client 2026-06-29). Same min-deposit gate as the full-IB flow.
+      const subElig = status?.eligibility as
+        | { min_deposit_required_usd: number; total_deposits_usd: number; is_eligible: boolean; kyc_approved?: boolean }
+        | undefined;
+      const subMin = subElig?.min_deposit_required_usd ?? 0;
+      const subDeposits = subElig?.total_deposits_usd ?? 0;
+      const subKyc = subElig?.kyc_approved !== false; // KYC cleared (or unknown)
+      const subDepositOk = subMin <= 0 || subDeposits >= subMin;
+      const subEligible = subElig ? subElig.is_eligible : true; // deposit AND kyc
+      const subPct = subMin > 0 ? Math.min(100, (subDeposits / subMin) * 100) : 100;
+      const subRemaining = Math.max(0, subMin - subDeposits);
       return (
-        <div className="rounded-xl border border-border-primary bg-card p-6 sm:p-10 noise-texture text-center space-y-4 max-w-lg mx-auto">
+        <div className="rounded-xl border border-border-primary bg-card p-6 sm:p-10 noise-texture text-center space-y-5 max-w-2xl mx-auto">
           <div className="text-3xl">🤝</div>
-          <h3 className="text-lg sm:text-xl font-bold text-text-primary">Become an Introducing Broker</h3>
+          <span className="inline-block text-xs font-semibold px-2.5 py-0.5 rounded-md bg-warning/15 text-warning">You joined under an IB</span>
+          <h3 className="text-lg sm:text-xl font-bold text-text-primary">Become a Sub-IB</h3>
           <p className="text-sm text-text-secondary leading-relaxed">
-            The IB program is by introduction. To become an IB and earn per-lot commissions on
-            your referrals, please get in touch with the SwisDex team.
+            You joined through an Introducing Broker, so the full IB program isn&apos;t
+            available here. You can apply as a <strong>Sub-IB</strong> instead — build your
+            own network and earn per-lot commission on your downline&apos;s trades.
           </p>
-          <a
-            href="/support?topic=become-ib"
-            className="inline-block px-6 py-3 rounded-xl text-sm font-bold bg-accent text-black hover:brightness-110 shadow-[0_0_24px_rgba(85,166,48,0.35)]"
+
+          {subElig && (subMin > 0 || !subKyc) && (
+            <div className="rounded-lg border border-border-primary bg-bg-secondary p-4 text-left space-y-2">
+              {!subKyc && (
+                <p className="text-[11px] text-warning">
+                  ⚠ Complete your KYC verification first — it&apos;s required before becoming a Sub-IB.
+                </p>
+              )}
+              {subMin > 0 && (
+                <>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-semibold text-text-secondary">Eligibility</span>
+                    <span className={clsx('text-xs font-bold tabular-nums', subDepositOk ? 'text-success' : 'text-warning')}>
+                      ${fmt(subDeposits)} / ${fmt(subMin)}
+                    </span>
+                  </div>
+                  <div className="h-2 rounded-full bg-bg-tertiary overflow-hidden">
+                    <div
+                      className={clsx('h-full transition-all', subDepositOk ? 'bg-success' : 'bg-warning')}
+                      style={{ width: `${subPct}%` }}
+                    />
+                  </div>
+                  <p className={clsx('text-[11px]', subDepositOk ? 'text-success' : 'text-text-tertiary')}>
+                    {subDepositOk
+                      ? 'You meet the minimum deposit requirement.'
+                      : `Deposit ${'$' + fmt(subRemaining)} more in approved funds to apply as a Sub-IB.`}
+                  </p>
+                </>
+              )}
+            </div>
+          )}
+
+          <button
+            type="button"
+            onClick={handleApplySubIb}
+            disabled={applying || !subEligible}
+            className={clsx(
+              'w-full max-w-xs mx-auto px-6 py-3.5 rounded-xl text-sm font-bold transition-all border-2 border-accent',
+              (applying || !subEligible)
+                ? 'opacity-50 cursor-not-allowed bg-bg-secondary text-text-tertiary'
+                : 'bg-accent text-black hover:brightness-110 shadow-[0_0_24px_rgba(85,166,48,0.35)]',
+            )}
           >
-            Contact SwisDex to become an IB
-          </a>
+            {applying ? 'Submitting...' : subEligible ? 'Apply as Sub-IB' : (!subKyc ? 'Complete KYC first' : 'Deposit to Unlock')}
+          </button>
         </div>
       );
     }
 
     const eligibility = status?.eligibility as
-      | { min_deposit_required_usd: number; total_deposits_usd: number; is_eligible: boolean }
+      | { min_deposit_required_usd: number; total_deposits_usd: number; is_eligible: boolean; kyc_approved?: boolean }
       | undefined;
 
     const minRequired = eligibility?.min_deposit_required_usd ?? 0;
 
     const currentDeposits = eligibility?.total_deposits_usd ?? 0;
 
-    const eligible = eligibility ? eligibility.is_eligible : true;
+    const kycOk = eligibility?.kyc_approved !== false; // KYC cleared (or unknown)
+
+    const depositOk = minRequired <= 0 || currentDeposits >= minRequired;
+
+    const eligible = eligibility ? eligibility.is_eligible : true; // deposit AND kyc
 
     const pct = minRequired > 0 ? Math.min(100, (currentDeposits / minRequired) * 100) : 100;
 
@@ -354,43 +467,53 @@ function IBTab() {
 
         <h3 className="text-lg sm:text-xl font-bold text-text-primary">Become an Introducing Broker</h3>
 
-        {eligibility && minRequired > 0 && (
+        {eligibility && (minRequired > 0 || !kycOk) && (
 
-          <div className="rounded-lg border border-border-primary bg-bg-secondary p-4 text-left">
+          <div className="rounded-lg border border-border-primary bg-bg-secondary p-4 text-left space-y-2">
 
-            <div className="flex items-center justify-between gap-2 mb-2">
+            {!kycOk && (
+              <p className="text-[11px] text-warning">
+                ⚠ Complete your KYC verification first — it&apos;s required before becoming an IB.
+              </p>
+            )}
 
-              <span className="text-xs font-semibold text-text-secondary">Eligibility</span>
+            {minRequired > 0 && (
+              <>
+                <div className="flex items-center justify-between gap-2">
 
-              <span className={clsx('text-xs font-bold tabular-nums', eligible ? 'text-success' : 'text-warning')}>
+                  <span className="text-xs font-semibold text-text-secondary">Eligibility</span>
 
-                ${fmt(currentDeposits)} / ${fmt(minRequired)}
+                  <span className={clsx('text-xs font-bold tabular-nums', depositOk ? 'text-success' : 'text-warning')}>
 
-              </span>
+                    ${fmt(currentDeposits)} / ${fmt(minRequired)}
 
-            </div>
+                  </span>
 
-            <div className="h-2 rounded-full bg-bg-tertiary overflow-hidden">
+                </div>
 
-              <div
+                <div className="h-2 rounded-full bg-bg-tertiary overflow-hidden">
 
-                className={clsx('h-full transition-all', eligible ? 'bg-success' : 'bg-warning')}
+                  <div
 
-                style={{ width: `${pct}%` }}
+                    className={clsx('h-full transition-all', depositOk ? 'bg-success' : 'bg-warning')}
 
-              />
+                    style={{ width: `${pct}%` }}
 
-            </div>
+                  />
 
-            <p className={clsx('text-[11px] mt-2', eligible ? 'text-success' : 'text-text-tertiary')}>
+                </div>
 
-              {eligible
+                <p className={clsx('text-[11px]', depositOk ? 'text-success' : 'text-text-tertiary')}>
 
-                ? 'You meet the minimum deposit requirement. Apply below.'
+                  {depositOk
 
-                : `Deposit ${'$' + fmt(remaining)} more in approved funds to qualify for the IB program.`}
+                    ? 'You meet the minimum deposit requirement.'
 
-            </p>
+                    : `Deposit ${'$' + fmt(remaining)} more in approved funds to qualify for the IB program.`}
+
+                </p>
+              </>
+            )}
 
           </div>
 
@@ -418,7 +541,7 @@ function IBTab() {
 
         >
 
-          {applying ? 'Submitting...' : eligible ? 'Apply Now' : 'Deposit to Unlock'}
+          {applying ? 'Submitting...' : eligible ? 'Apply Now' : (!kycOk ? 'Complete KYC first' : 'Deposit to Unlock')}
 
         </button>
 
@@ -430,38 +553,30 @@ function IBTab() {
 
 
 
+  // A Sub-IB (anyone not introduced directly by the Super IB) does NOT get the
+  // IB program section — only a prompt to apply to SwisDex (client 2026-06-23:
+  // "sub-sub wale ko IB section show ho raha hai").
+  if (dashboard?.is_sub_ib) {
+    return (
+      <div className="rounded-xl border border-border-primary bg-card p-6 sm:p-8 noise-texture text-center max-w-lg mx-auto space-y-3">
+        <div className="text-2xl">🤝</div>
+        <h3 className="text-sm font-semibold text-text-primary">You&apos;re a Sub-IB</h3>
+        <p className="text-xxs text-text-tertiary">
+          The IB program is available to full IBs. To become a full IB, apply to SwisDex.
+        </p>
+        <a
+          href="/support?topic=ib-upgrade"
+          className="inline-block text-xs font-medium px-4 py-2 rounded-md bg-accent/15 text-accent border border-accent/30 hover:bg-accent/25"
+        >
+          Apply to SwisDex to become an IB
+        </a>
+      </div>
+    );
+  }
+
   return (
 
     <div className="space-y-4">
-
-      {/* IB vs Sub-IB header (client spec 2026-06-16). Only someone introduced
-          by the Super IB (SDA05) is a full IB; everyone else is a Sub-IB and
-          can request an upgrade by contacting SwisDex. */}
-      <div className="flex items-center justify-between gap-3 rounded-lg border border-border-primary bg-bg-secondary px-4 py-3">
-        <div className="flex items-center gap-2 min-w-0">
-          <span className={clsx(
-            'text-xs font-semibold px-2 py-0.5 rounded-md shrink-0',
-            dashboard?.ib_type === 'super_ib' ? 'bg-accent/15 text-accent'
-              : dashboard?.is_sub_ib ? 'bg-warning/15 text-warning'
-              : 'bg-success/15 text-success',
-          )}>
-            {dashboard?.ib_type === 'super_ib' ? 'Super IB' : dashboard?.is_sub_ib ? 'Sub-IB' : 'IB'}
-          </span>
-          <span className="text-xs text-text-secondary truncate">
-            {dashboard?.is_sub_ib
-              ? 'You are a Sub-IB — you earn on your own referrals and downline.'
-              : 'You are a full IB.'}
-          </span>
-        </div>
-        {dashboard?.can_request_ib_upgrade && (
-          <a
-            href="/support?topic=ib-upgrade"
-            className="text-xs font-medium px-3 py-1.5 rounded-md bg-accent/15 text-accent border border-accent/30 hover:bg-accent/25 whitespace-nowrap shrink-0"
-          >
-            Contact SwisDex to become IB
-          </a>
-        )}
-      </div>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
 
@@ -478,8 +593,6 @@ function IBTab() {
           { label: 'Active Users', value: `${status?.active_users || 0}${status?.total_referred ? ` / ${status.total_referred}` : ''}`, color: 'text-success' },
 
           { label: 'Referrals', value: String(dashboard?.total_referrals ?? status?.total_referred ?? 0), color: 'text-accent' },
-
-          { label: 'Level', value: `L${dashboard?.level || 1}`, color: 'text-text-primary' },
 
         ].map(c => (
 
@@ -847,11 +960,12 @@ function SubBrokerTab() {
 
   const [dashboard, setDashboard] = useState<any>(null);
 
+  // The full IB-dashboard payload (tier, deposit pool, per-user commission
+  // breakdown) — surfaced here so a Sub-IB sees their tier/pool/earnings even
+  // though the IB Program tab is hidden for them (client 2026-06-29).
+  const [ibDash, setIbDash] = useState<any>(null);
+
   const [loading, setLoading] = useState(true);
-
-  const [applying, setApplying] = useState(false);
-
-  const [companyName, setCompanyName] = useState('');
 
 
 
@@ -867,13 +981,12 @@ function SubBrokerTab() {
 
         if (s.is_ib) {
 
-          try {
-
-            const d = await api.get<any>('/business/sub-broker/dashboard');
-
-            setDashboard(d);
-
-          } catch {}
+          const [d, ib] = await Promise.allSettled([
+            api.get<any>('/business/sub-broker/dashboard'),
+            api.get<any>('/business/ib/dashboard'),
+          ]);
+          if (d.status === 'fulfilled') setDashboard(d.value);
+          if (ib.status === 'fulfilled') setIbDash(ib.value);
 
         }
 
@@ -882,26 +995,6 @@ function SubBrokerTab() {
     })();
 
   }, []);
-
-
-
-  const handleApply = async () => {
-
-    setApplying(true);
-
-    try {
-
-      await api.post('/business/apply-sub-broker', { company_name: companyName || undefined });
-
-      toast.success('Sub-broker application submitted!');
-
-      const s = await api.get<any>('/business/status');
-
-      setStatus(s);
-
-    } catch (e: any) { toast.error(e.message || 'Failed'); } finally { setApplying(false); }
-
-  };
 
 
 
@@ -939,7 +1032,15 @@ function SubBrokerTab() {
 
           {[
 
-            { label: 'Clients', value: String(dashboard.direct_clients || 0), color: 'text-accent' },
+            { label: 'Sub-Brokers', value: String(dashboard.direct_clients || 0), color: 'text-accent' },
+
+            // Pool + active users come from /business/status (always present),
+            // so a Sub-IB sees their direct downline's deposit pool up top even
+            // if the richer /ib/dashboard fetch is slow/unavailable (client
+            // 2026-06-29: "Sub-IB ko direct user ka pool amount nahi dikh raha").
+            { label: 'Users Deposit Pool', value: `$${fmt(status?.deposit_pool_usd || 0)}`, color: 'text-accent' },
+
+            { label: 'Active Users', value: `${status?.active_users || 0}${status?.total_referred ? ` / ${status.total_referred}` : ''}`, color: 'text-success' },
 
             { label: 'Total Earned', value: `$${fmt(dashboard.total_earned || 0)}`, color: 'text-success' },
 
@@ -963,19 +1064,121 @@ function SubBrokerTab() {
 
 
 
-        <div className="rounded-xl border border-border-primary bg-card p-4 noise-texture">
+        <div className="rounded-xl border border-border-primary bg-card p-4 noise-texture space-y-3">
 
-          <p className="text-xxs text-text-tertiary mb-2">Your Referral Code</p>
+          {/* Full shareable referral link (client 2026-06-30: Sub-IB ka link
+              generate nahi ho raha tha — sirf code dikh raha tha). */}
+          <div>
+            <p className="text-xxs text-text-tertiary mb-1">Your referral link</p>
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                readOnly
+                value={ibDash?.referral_link || (typeof window !== 'undefined' ? `${window.location.origin}/auth/register?ref=${dashboard.referral_code}` : '')}
+                className="flex-1 text-xs font-mono bg-bg-secondary border border-border-primary rounded-lg px-3 py-2 text-text-primary focus:outline-none"
+              />
+              <button
+                type="button"
+                onClick={() => {
+                  const link = ibDash?.referral_link || `${window.location.origin}/auth/register?ref=${dashboard.referral_code}`;
+                  navigator.clipboard.writeText(link);
+                  toast.success('Link copied!');
+                }}
+                className="shrink-0 px-3 py-2 text-xs font-semibold rounded-lg border border-accent text-accent hover:bg-accent hover:text-black transition-colors"
+              >
+                Copy
+              </button>
+            </div>
+          </div>
 
-          <div className="flex items-center gap-2">
-
-            <span className="text-lg font-bold font-mono text-accent">{dashboard.referral_code}</span>
-
-            <button type="button" onClick={() => { navigator.clipboard.writeText(dashboard.referral_code); toast.success('Copied!'); }} className="px-2 py-1 text-xxs font-semibold rounded-lg border border-accent text-accent hover:bg-accent hover:text-black transition-colors">Copy</button>
-
+          <div>
+            <p className="text-xxs text-text-tertiary mb-1">Your referral code</p>
+            <div className="flex items-center gap-2">
+              <span className="text-lg font-bold font-mono text-accent">{dashboard.referral_code}</span>
+              <button type="button" onClick={() => { navigator.clipboard.writeText(dashboard.referral_code); toast.success('Copied!'); }} className="px-2 py-1 text-xxs font-semibold rounded-lg border border-accent text-accent hover:bg-accent hover:text-black transition-colors">Copy</button>
+            </div>
           </div>
 
         </div>
+
+        {/* Transfer commission to main wallet — a Sub-IB withdraws their
+            earnings the same way a full IB does (client 2026-06-30: "total earn
+            dikha raha hai par claim/wallet me nahi ja raha"). */}
+        {ibDash && (
+          <div className="rounded-xl border border-success/30 bg-success/[0.06] p-4 flex flex-wrap items-center justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-xxs uppercase tracking-wider text-text-tertiary">Available commission</p>
+              <p className="text-2xl font-bold text-success font-mono tabular-nums mt-0.5">${fmt(ibDash.commission_balance || 0)}</p>
+              <p className="text-[11px] text-text-tertiary mt-0.5">Transfer moves it into your main wallet — then withdraw from the Wallet page.</p>
+            </div>
+            <button
+              type="button"
+              onClick={async () => {
+                try {
+                  const res = await api.post<{ transferred: number }>('/business/ib/transfer', {});
+                  toast.success(`$${fmt(res.transferred)} moved to main wallet`);
+                  const [d, ib] = await Promise.allSettled([
+                    api.get<any>('/business/sub-broker/dashboard'),
+                    api.get<any>('/business/ib/dashboard'),
+                  ]);
+                  if (d.status === 'fulfilled') setDashboard(d.value);
+                  if (ib.status === 'fulfilled') setIbDash(ib.value);
+                } catch (e: any) { toast.error(e?.message || 'Transfer failed'); }
+              }}
+              disabled={!(ibDash.commission_balance > 0)}
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-success hover:bg-success/90 text-black font-semibold text-sm disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              Transfer to Main Wallet
+            </button>
+          </div>
+        )}
+
+
+
+        {/* Which tier the Sub-IB falls in + progress to the next one (client
+            2026-06-29). Pool / active users are shown in the top cards above. */}
+        {ibDash && (
+          <div className="grid grid-cols-2 gap-3">
+            <div className="rounded-xl border border-border-primary bg-card p-3 noise-texture">
+              <p className="text-xxs text-text-tertiary">Your Tier</p>
+              <p className="text-lg font-bold mt-0.5 text-accent">{ibDash.tier?.label || 'Unranked'}</p>
+              <p className="text-xxs text-text-tertiary">{ibDash.tier?.per_lot != null ? `$${fmt(ibDash.tier.per_lot)}/lot` : 'No tier yet — base rate applies'}</p>
+            </div>
+            <div className="rounded-xl border border-border-primary bg-card p-3 noise-texture">
+              <p className="text-xxs text-text-tertiary">Next Tier</p>
+              <p className="text-lg font-bold mt-0.5 text-text-primary">{ibDash.next_tier?.label || 'Top tier'}</p>
+              <p className="text-xxs text-text-tertiary">
+                {ibDash.next_tier
+                  ? [ibDash.needed_activations_for_next ? `${ibDash.needed_activations_for_next} more users` : null,
+                     ibDash.needed_amount_for_next ? `$${fmt(ibDash.needed_amount_for_next)} more pool` : null]
+                     .filter(Boolean).join(' or ') || '—'
+                  : '—'}
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* Per-user commission breakdown — "kis user se kitna mila" (client
+            2026-06-29). Same data the full-IB dashboard shows. */}
+        {ibDash?.earnings_by_user?.length > 0 && (
+          <div className="rounded-xl border border-border-primary bg-card noise-texture overflow-hidden">
+            <div className="px-4 py-3 border-b border-border-primary"><h3 className="text-xs font-semibold text-text-primary">Commission by User</h3></div>
+            <table className="w-full text-xs">
+              <thead><tr className="border-b border-border-primary text-xxs text-text-tertiary">
+                <th className="px-4 py-2 text-left">User</th><th className="px-4 py-2 text-right">Trades</th><th className="px-4 py-2 text-right">Earned</th>
+              </tr></thead>
+              <tbody>
+                {ibDash.earnings_by_user.map((u: any) => (
+                  <tr key={u.user_id} className="border-b border-border-primary/50 hover:bg-bg-hover/30">
+                    <td className="px-4 py-2"><p className="text-text-primary">{u.name || u.email}</p><p className="text-xxs text-text-tertiary">{u.email}</p></td>
+                    <td className="px-4 py-2 text-right font-mono text-text-secondary">{u.trades_attributed}</td>
+                    <td className="px-4 py-2 text-right font-mono text-success">${fmt(u.total_commission || 0)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
 
 
 
@@ -983,7 +1186,7 @@ function SubBrokerTab() {
 
           <div className="rounded-xl border border-border-primary bg-card noise-texture overflow-hidden">
 
-            <div className="px-4 py-3 border-b border-border-primary"><h3 className="text-xs font-semibold text-text-primary">Your Clients</h3></div>
+            <div className="px-4 py-3 border-b border-border-primary"><h3 className="text-xs font-semibold text-text-primary">Your Sub-Brokers</h3></div>
 
             <table className="w-full text-xs">
 
@@ -1025,48 +1228,55 @@ function SubBrokerTab() {
 
   }
 
-
-
-  return (
-
-    <div className="rounded-xl border border-border-primary bg-card p-6 sm:p-10 noise-texture text-center space-y-5 max-w-2xl mx-auto">
-
-      <h3 className="text-lg sm:text-xl font-bold text-text-primary">Become a Sub-Broker</h3>
-
-      <p className="text-xs sm:text-sm text-text-secondary max-w-md mx-auto leading-relaxed">Partner with us as a sub-broker. Get your own referral code, manage clients, and earn revenue share on all their trading activity.</p>
-
-      <div className="max-w-sm mx-auto text-left">
-
-        <label className="text-xxs text-text-secondary block mb-1">Company Name (optional)</label>
-
-        <input type="text" value={companyName} onChange={e => setCompanyName(e.target.value)} placeholder="Your company name" className="skeu-input w-full text-text-primary rounded-xl py-2.5 px-4 text-xs border-border-primary focus:border-accent focus:ring-1 focus:ring-accent/30" />
-
+  // A full IB does NOT apply to be a sub-broker (client 2026-06-20): they
+  // already have a higher tier. Show their network pointer instead of the
+  // apply form.
+  if (status?.is_ib) {
+    return (
+      <div className="rounded-xl border border-border-primary bg-card p-6 sm:p-8 noise-texture text-center max-w-lg mx-auto space-y-2">
+        <div className="text-2xl">✅</div>
+        <h3 className="text-sm font-semibold text-text-primary">You're already an IB</h3>
+        <p className="text-xxs text-text-tertiary">
+          As an IB you don&apos;t need to apply as a sub-broker. See your sub-IBs and downline in the
+          <span className="text-accent font-medium"> My Network</span> tab.
+        </p>
       </div>
+    );
+  }
 
-      <button
+  // A user who can become a FULL IB (introduced by the Super IB, or with no
+  // referrer) is on the IB track — they must NOT be offered the sub-broker /
+  // sub-IB apply (client 2026-06-29: "IB ko sub-IB banne ka option dikh raha
+  // hai"). Only a user introduced by ANOTHER IB (can_become_ib === false)
+  // belongs here. (!== false also covers the undefined/loading case → safer to
+  // hide the form than to wrongly offer it.)
+  if (status?.can_become_ib !== false) {
+    return (
+      <div className="rounded-xl border border-border-primary bg-card p-6 sm:p-8 noise-texture text-center max-w-lg mx-auto space-y-2">
+        <div className="text-2xl">🚀</div>
+        <h3 className="text-sm font-semibold text-text-primary">Become a full IB instead</h3>
+        <p className="text-xxs text-text-tertiary">
+          You&apos;re eligible for the full Introducing Broker program — apply from the
+          <span className="text-accent font-medium"> IB Program</span> tab. The sub-broker
+          path is only for users who joined through an existing IB.
+        </p>
+      </div>
+    );
+  }
 
-        type="button"
-
-        onClick={handleApply}
-
-        disabled={applying}
-
-        className={clsx(
-
-          'w-full max-w-xs mx-auto px-6 py-3.5 rounded-xl text-sm font-bold transition-all border-2 border-accent',
-
-          applying ? 'opacity-50 cursor-not-allowed' : 'bg-accent text-black hover:brightness-110 shadow-[0_0_24px_rgba(85,166,48,0.35)]',
-
-        )}
-
-      >
-
-        {applying ? 'Submitting...' : 'Apply as Sub-Broker'}
-
-      </button>
-
+  // can_become_ib === false → introduced by another IB → sub-IB track. The
+  // single apply entry point is the IB Program tab's "Apply as Sub-IB" button
+  // (client 2026-06-29: keep sub-IB apply in ONE place — no duplicate form).
+  return (
+    <div className="rounded-xl border border-border-primary bg-card p-6 sm:p-8 noise-texture text-center max-w-lg mx-auto space-y-2">
+      <div className="text-2xl">🤝</div>
+      <h3 className="text-sm font-semibold text-text-primary">Apply as a Sub-IB</h3>
+      <p className="text-xxs text-text-tertiary">
+        You joined through an Introducing Broker. Apply as a Sub-IB from the
+        <span className="text-accent font-medium"> IB Program</span> tab — once approved,
+        your downline and earnings show up here and in My Network.
+      </p>
     </div>
-
   );
 
 }
@@ -1127,7 +1337,7 @@ function NetworkTab() {
 
           <span className="text-text-tertiary">Your Code: <span className="text-accent font-mono font-bold">{tree.root?.referral_code}</span></span>
 
-          <span className="text-text-tertiary">Level: <span className="text-text-primary font-bold">L{tree.root?.level}</span></span>
+          <span className="text-text-tertiary">Level: <span className="text-text-primary font-bold">L{Math.max(1, (tree.root?.level || 2) - 1)}</span></span>
 
           <span className="text-text-tertiary">Total Earned: <span className="text-success font-mono font-bold">${fmt(tree.root?.total_earned || 0)}</span></span>
 

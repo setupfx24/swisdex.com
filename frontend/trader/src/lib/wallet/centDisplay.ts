@@ -48,8 +48,10 @@ export function fmtAccountMoney(
   if (!Number.isFinite(n)) return isCent ? `${CENT_SYMBOL}0.00` : '$0.00';
   if (isCent) {
     const cents = n * CENT_PER_USD;
-    const sign = opts.signDisplay === 'always' && cents > 0 ? '+' : '';
-    return `${sign}${CENT_SYMBOL}${cents.toLocaleString('en-US', {
+    // Sign goes BEFORE the ¢ symbol ("-¢400.00", not "¢-400.00").
+    const sign =
+      cents < 0 ? '-' : opts.signDisplay === 'always' && cents > 0 ? '+' : '';
+    return `${sign}${CENT_SYMBOL}${Math.abs(cents).toLocaleString('en-US', {
       minimumFractionDigits: decimals,
       maximumFractionDigits: decimals,
     })}`;

@@ -212,11 +212,117 @@ def _first_payout_date(lock_dt: datetime, cycle_months: int, payout_day: int = 2
 
 # ─── Lock flow ───────────────────────────────────────────────────────
 
+async def _pay_fr_referral(
+    db: AsyncSession, referred_user_id: UUID, basis_amount: Decimal, kind: str,
+) -> None:
+    """Pay the AI-Powered-Staking referral commission to the referred user's
+    referrer, into their referral_commission_balance (withdrawn from /referral).
+
+      kind='principal' → fires ONCE when the referred user locks; pct =
+                         fr_referral_principal_pct of the principal.
+      kind='interest'  → fires on EACH interest payout; pct =
+                         fr_referral_interest_pct of that payout.
+
+    Only pays when the referrer's chosen mode matches `kind` and the admin %
+    is > 0. Best-effort — never blocks the lock / payout. (client 2026-06-30)
+    """
+    try:
+        referred_row = (await db.execute(
+            select(
+                User.referred_by_user_id, User.first_name, User.last_name, User.email,
+            ).where(User.id == referred_user_id)
+        )).first()
+        if not referred_row:
+            return
+        referrer_id, _rf, _rl, _re = referred_row
+        if not referrer_id:
+            # Fallback: users who joined via an IB code before 2026-06-23 have
+            # no personal referral link (referred_by_user_id was never set) —
+            # only a Referral row in the IB tree. Resolve the referrer from
+            # there so their staking still pays the IB. Migration 0094
+            # backfills the column; this guard covers any row it misses.
+            from packages.common.src.models import Referral
+            referrer_id = (await db.execute(
+                select(Referral.referrer_id)
+                .where(Referral.referred_id == referred_user_id)
+                .order_by(Referral.created_at.asc())
+                .limit(1)
+            )).scalar_one_or_none()
+        if not referrer_id or referrer_id == referred_user_id:
+            return
+        referred_display = " ".join(filter(None, [_rf, _rl])).strip() or (_re or "a referral")
+        referrer = (await db.execute(
+            select(User).where(User.id == referrer_id).with_for_update()
+        )).scalar_one_or_none()
+        if referrer is None:
+            return
+        # Per-referrer OVERRIDE for THIS leg (migration 0090). A custom offer
+        # pays on its leg REGARDLESS of the referrer's mode — so admin can pay a
+        # user on BOTH principal AND interest by setting both overrides. Without
+        # an override, the referrer earns only on their chosen mode leg
+        # (unchanged behaviour for everyone else). This is the fix for
+        # "custom % not working": mode=principal previously killed the interest
+        # override entirely (client 2026-07-06).
+        override = (
+            referrer.fr_referral_principal_pct_override if kind == "principal"
+            else referrer.fr_referral_interest_pct_override
+        )
+        mode = (referrer.fr_referral_mode or "principal").lower()
+        if override is None and mode != kind:
+            return
+        # The GLOBAL (standard) % this leg pays; the portion ABOVE it is the
+        # promotional EXPENSE (extra income) logged below.
+        setting = "fr_referral_principal_pct" if kind == "principal" else "fr_referral_interest_pct"
+        global_pct = Decimal(str(await get_float_setting(setting, 0.0)))
+        pct = Decimal(str(override)) if override is not None else global_pct
+        if pct <= 0:
+            return
+        basis = Decimal(str(basis_amount))
+        commission = (basis * pct / Decimal("100")).quantize(Decimal("0.01"))
+        if commission <= 0:
+            return
+        referrer.referral_commission_balance = (
+            Decimal(str(referrer.referral_commission_balance or 0)) + commission
+        )
+        db.add(Transaction(
+            user_id=referrer.id,
+            type="referral_commission",
+            amount=commission,
+            balance_after=None,
+            description=(
+                f"AI Powered Staking referral from {referred_display} — {pct}% of "
+                f"{'principal' if kind == 'principal' else 'interest payout'}"
+            ),
+        ))
+        # Promotional extra = the premium above the standard rate (only when the
+        # referrer has a boosted override). Logged as a PromotionalExpense so it
+        # shows in admin's Promotional Expenses AND as the user's extra income.
+        extra_pct = pct - global_pct
+        if extra_pct > 0:
+            extra = (basis * extra_pct / Decimal("100")).quantize(Decimal("0.01"))
+            if extra > 0:
+                from packages.common.src.models import PromotionalExpense
+                db.add(PromotionalExpense(
+                    user_id=referrer.id,
+                    amount=extra,
+                    category="fr_referral_extra",
+                    note=(
+                        f"AI Powered Staking referral — extra {extra_pct}% "
+                        f"(paid {pct}% vs standard {global_pct}%) on "
+                        f"{'principal' if kind == 'principal' else 'interest payout'} "
+                        f"from {referred_display}"
+                    ),
+                ))
+    except Exception as _e:  # noqa: BLE001
+        logger.warning("AI-Staking referral payout (%s) failed: %s", kind, _e)
+
+
 async def create_lock(
     user_id: UUID,
     principal: Decimal,
     tenure_label: str,
     db: AsyncSession,
+    acknowledge_bonus_forfeit: bool = False,
 ) -> dict:
     if principal <= 0:
         raise HTTPException(status_code=400, detail="Principal must be positive")
@@ -260,9 +366,41 @@ async def create_lock(
             detail=f"Insufficient wallet balance (have ${balance:,.2f}, need ${principal:,.2f})",
         )
 
-    user.main_wallet_balance = balance - principal
-
     now = datetime.now(timezone.utc)
+    remaining = balance - principal
+
+    # Bonus rule (client 2026-06-30): the trading bonus must stay "backed" by
+    # real wallet money. If locking would leave LESS than the bonus amount in
+    # the wallet, the ENTIRE bonus is forfeited — and the user must accept that
+    # via a confirm popup first. If they haven't (acknowledge_bonus_forfeit is
+    # False), reject with 409 so the UI can prompt instead of silently burning
+    # the bonus.
+    bonus = Decimal(str(user.main_wallet_bonus or 0))
+    forfeit_bonus = bonus > 0 and remaining < bonus
+    if forfeit_bonus and not acknowledge_bonus_forfeit:
+        # 409 + a plain-string detail so the trader UI (which only surfaces
+        # err.message + err.status) can show the warning verbatim in an
+        # "agree" confirm popup, then re-submit with acknowledge_bonus_forfeit.
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Locking ${principal:,.2f} leaves less than your ${bonus:,.2f} "
+                f"bonus in the wallet, so your entire ${bonus:,.2f} bonus will be "
+                f"forfeited (it can't be used for staking)."
+            ),
+        )
+
+    user.main_wallet_balance = remaining
+    if forfeit_bonus:
+        user.main_wallet_bonus = Decimal("0")
+        user.bonus_forfeited_at = now
+        db.add(Transaction(
+            user_id=user_id,
+            type="bonus_forfeit",
+            amount=-bonus,
+            balance_after=user.main_wallet_balance,
+            description=f"Bonus forfeited — locked ${principal:,.2f} into AI Powered Staking",
+        ))
     # Maturity = anniversary − 1 day (Mig 0067 / client spec 2026-06-08)
     # so users can withdraw on the eve of their lock anniversary.
     matures_at = _add_months(now, lock_months) - timedelta(days=1)
@@ -303,6 +441,11 @@ async def create_lock(
         balance_after=user.main_wallet_balance,
         description=f"Fixed Return lock — {tenure['label']} cycle @ {rate_pct}% / {lock_months}m",
     ))
+
+    # AI-Staking referral: pay the referrer their principal-% commission now
+    # (only fires if the referrer chose 'principal' mode and admin set a %).
+    await _pay_fr_referral(db, user_id, principal, "principal")
+
     await db.commit()
     await db.refresh(lock)
     return _serialize_lock(lock)
@@ -812,6 +955,9 @@ async def accrue_due_payouts(db: AsyncSession) -> int:
                     f"#{lock.payouts_count} ({lock.rate_pct}%)"
                 ),
             ))
+            # AI-Staking referral: pay the referrer their interest-% cut of this
+            # payout (only if they chose 'interest' mode and admin set a %).
+            await _pay_fr_referral(db, lock.user_id, interest, "interest")
             # Notification: "you can withdraw" — informs the user the
             # interest just landed in their main wallet and they're free
             # to withdraw it (the wallet itself is always withdrawable).
@@ -878,9 +1024,15 @@ def _serialize_lock(r: FixedReturnLock) -> dict:
         anchor = r.locked_at
         if anchor and anchor.tzinfo is None:
             anchor = anchor.replace(tzinfo=timezone.utc)
+    # Count WHOLE CALENDAR DAYS in IST (UTC+5:30), not rolling 24h periods, so
+    # the displayed accrued interest ticks up at local 12:00 AM each day rather
+    # than at the lock's time-of-day (client 2026-06-30: "jo interest show ho
+    # raha hai woh 12am par update ho jaye"). The actual payout cadence is
+    # unchanged — this only affects the live accrued projection shown to the user.
     days_elapsed = 0
     if anchor is not None:
-        days_elapsed = max(0, (now - anchor).days)
+        _ist = timezone(timedelta(hours=5, minutes=30))
+        days_elapsed = max(0, (now.astimezone(_ist).date() - anchor.astimezone(_ist).date()).days)
     # rate_pct is per 30-day month per client spec, so daily ≈ rate/30.
     daily_rate = rate_pct / Decimal("100") / Decimal("30")
     accrued_since_last = (

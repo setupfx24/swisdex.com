@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import smtplib
 import urllib.request
 from email.message import EmailMessage
@@ -20,6 +21,26 @@ from typing import Optional
 from .config import get_settings
 
 logger = logging.getLogger(__name__)
+
+# Brand logo bundled INSIDE the backend image so inline embedding never depends
+# on a live network fetch of EMAIL_LOGO_URL (a transient fetch failure used to
+# drop the logo to a remote <img> that image-blocking clients then hid). Read
+# from disk first; the URL fetch below is only a fallback.
+_LOCAL_LOGO_PATH = os.path.join(
+    os.path.dirname(__file__), "email_templates", "swisdex_logo.png",
+)
+
+
+def _get_local_logo_bytes() -> Optional[tuple[bytes, str]]:
+    """Bytes of the logo bundled with the backend, or None if it's absent."""
+    try:
+        with open(_LOCAL_LOGO_PATH, "rb") as f:
+            data = f.read()
+        if data:
+            return (data, "png")
+    except Exception:
+        pass
+    return None
 
 # Cache of fetched logo bytes keyed by URL → (bytes, image_subtype). Filled
 # lazily on the first send so we hit the network once, then embed the logo
@@ -61,6 +82,24 @@ def _get_logo_bytes(url: str) -> Optional[tuple[bytes, str]]:
 def smtp_configured() -> bool:
     s = get_settings()
     return bool(s.SMTP_HOST and str(s.SMTP_HOST).strip())
+
+
+# Reserved / non-routable domains that can NEVER receive real mail (RFC 2606 /
+# RFC 6761) plus our own demo-account domain. Sending to these always produces
+# a "Undelivered Mail Returned to Sender" bounce that lands back in the sender
+# inbox and, in volume, hurts sender reputation (real mail starts landing in
+# spam). The demo downline seeded for the promo account use
+# `@swisdex-promo.local`, which is why the inbox filled with bounces. We drop
+# these at the single send choke point instead of attempting delivery.
+_UNDELIVERABLE_SUFFIXES = (
+    ".local", ".localhost", ".invalid", ".test", ".example",
+    "@example.com", "@example.net", "@example.org",
+)
+
+
+def _is_undeliverable(to_email: str) -> bool:
+    addr = (to_email or "").strip().lower()
+    return any(addr.endswith(sfx) for sfx in _UNDELIVERABLE_SUFFIXES)
 
 
 # ── Per-category From aliases ─────────────────────────────────────────
@@ -144,7 +183,43 @@ def _from_address(category: str = "default") -> str:
     return f"{name} <{addr}>"
 
 
-def _send_sync(to_email: str, subject: str, html: str, text: Optional[str], category: str) -> None:
+def _attach_files(msg: EmailMessage, attachments: Optional[list]) -> None:
+    """Attach caller-supplied files (e.g. support-ticket screenshots).
+
+    Each item is a {name, type, data} dict where `data` is a base64 data URL
+    (``data:image/png;base64,...``) or a bare base64 string. Silently skips a
+    file that can't be decoded, or one over ~8 MB (SMTP servers reject huge
+    messages) — the note in the body still tells the admin to check the panel.
+    """
+    import base64 as _b64
+    for att in (attachments or []):
+        try:
+            raw = (att.get("data") or "") if isinstance(att, dict) else ""
+            if not raw:
+                continue
+            mime = (att.get("type") or "").strip() if isinstance(att, dict) else ""
+            if raw.strip().lower().startswith("data:") and "," in raw:
+                header, b64 = raw.split(",", 1)
+                if not mime and ":" in header and ";" in header:
+                    mime = header.split(":", 1)[1].split(";", 1)[0].strip()
+            else:
+                b64 = raw
+            content = _b64.b64decode(b64, validate=False)
+            if not content or len(content) > 8 * 1024 * 1024:
+                continue
+            mime = mime or "application/octet-stream"
+            maintype, _, subtype = mime.partition("/")
+            msg.add_attachment(
+                content, maintype=(maintype or "application"),
+                subtype=(subtype or "octet-stream"),
+                filename=(att.get("name") if isinstance(att, dict) else None) or "attachment",
+            )
+        except Exception:
+            logger.warning("could not attach a file to email")
+
+
+def _send_sync(to_email: str, subject: str, html: str, text: Optional[str], category: str,
+               attachments: Optional[list] = None) -> None:
     s = get_settings()
     msg = EmailMessage()
     msg["Subject"] = subject
@@ -165,7 +240,9 @@ def _send_sync(to_email: str, subject: str, html: str, text: Optional[str], cate
     logo_bytes: Optional[tuple[bytes, str]] = None
     logo_url = (getattr(s, "EMAIL_LOGO_URL", "") or "").strip()
     if logo_url and logo_url in html:
-        logo_bytes = _get_logo_bytes(logo_url)
+        # Prefer the bundled logo (no network) and only fetch the URL if it's
+        # missing from the image — guarantees the inline logo on every send.
+        logo_bytes = _get_local_logo_bytes() or _get_logo_bytes(logo_url)
         if logo_bytes:
             html = html.replace(logo_url, f"cid:{_LOGO_CID}")
 
@@ -185,9 +262,18 @@ def _send_sync(to_email: str, subject: str, html: str, text: Optional[str], cate
             html_part.add_related(
                 logo_bytes[0], maintype="image", subtype=logo_bytes[1],
                 cid=f"<{_LOGO_CID}>",
+                # Mark it inline WITH a filename — without these the logo shows
+                # up as a stray "noname" attachment in Gmail/Outlook
+                # (client 2026-06-26).
+                disposition="inline",
+                filename=f"logo.{logo_bytes[1] or 'png'}",
             )
         except Exception:
             logger.exception("Failed to embed inline logo — mail will use remote URL fallback")
+
+    # Real file attachments last, so they sit at the top level (multipart/mixed)
+    # and don't disturb the inline-logo related part above.
+    _attach_files(msg, attachments)
 
     host = str(s.SMTP_HOST).strip()
     port = int(s.SMTP_PORT)
@@ -208,6 +294,7 @@ async def send_email(
     *,
     text: Optional[str] = None,
     category: str = "info",
+    attachments: Optional[list] = None,
 ) -> bool:
     """Send a transactional email. Returns True on success, False on
     misconfiguration or SMTP failure. Never raises — caller can ignore
@@ -231,8 +318,14 @@ async def send_email(
     if not to_email or "@" not in to_email:
         logger.warning("Skipping email — bad recipient %r", to_email)
         return False
+    # Demo / reserved domains (e.g. the @swisdex-promo.local downline) never
+    # deliver — sending only generates bounce-backs to the sender inbox. Skip
+    # silently (info log, not warning) so demo data doesn't pollute the queue.
+    if _is_undeliverable(to_email):
+        logger.info("Skipping email — non-deliverable/demo recipient %s subj=%r", to_email, subject)
+        return False
     try:
-        await asyncio.to_thread(_send_sync, to_email, subject, html, text, category)
+        await asyncio.to_thread(_send_sync, to_email, subject, html, text, category, attachments)
         logger.info("email sent to=%s cat=%s subj=%r", to_email, category, subject)
         return True
     except Exception:

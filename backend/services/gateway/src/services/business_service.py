@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from packages.common.src.models import (
     IBProfile, IBApplication, IBCommission, IBCommissionPlan,
-    Referral, User, TradingAccount, Deposit,
+    Referral, User, TradingAccount, Deposit, Transaction,
 )
 from packages.common.src.settings_store import get_float_setting
 
@@ -76,10 +76,42 @@ async def _resolve_ib_type(db: AsyncSession, profile: IBProfile) -> str:
     if super_id is not None:
         if profile.id == super_id:
             return "super_ib"
-        if profile.parent_ib_id == super_id:
+        # A NULL parent means there's no introducing IB above this profile —
+        # i.e. a full IB that sits directly under the Super IB (e.g. a
+        # no-referral user who self-applied). Only a profile whose parent is
+        # ANOTHER (non-super) IB is a Sub-IB. Treating NULL as sub_ib wrongly
+        # hid the IB dashboard from real IBs (client 2026-06-24).
+        if profile.parent_ib_id is None or profile.parent_ib_id == super_id:
             return "ib"
         return "sub_ib"
     return "ib" if profile.parent_ib_id is None else "sub_ib"
+
+
+async def _get_introducer_user_id(db: AsyncSession, user_id: UUID) -> UUID | None:
+    """Who introduced this user, across ALL signup paths (client 2026-06-19).
+
+    There are two code namespaces and three ways a signup gets attributed:
+      1. a personal `User.referral_code` → sets `User.referred_by_user_id`;
+      2. an `IBProfile.referral_code` (e.g. the Super IB 'SDA05') → writes a
+         `Referral` row but leaves `referred_by_user_id` NULL;
+      3. a no-code signup → auto-attached under the Super IB via a `Referral` row.
+
+    The old gating only looked at `referred_by_user_id`, so anyone who joined
+    through an IB *code* (cases 2 & 3) looked un-introduced and could wrongly
+    self-apply. Derive the introducer from `referred_by_user_id` first, then
+    fall back to the `Referral` row written at signup."""
+    ref = (await db.execute(
+        select(User.referred_by_user_id).where(User.id == user_id)
+    )).first()
+    if ref and ref[0] is not None:
+        return ref[0]
+    row = (await db.execute(
+        select(Referral.referrer_id)
+        .where(Referral.referred_id == user_id)
+        .order_by(Referral.created_at.asc())
+        .limit(1)
+    )).first()
+    return row[0] if row else None
 
 
 async def _can_self_apply_ib(db: AsyncSession, user_id: UUID) -> bool:
@@ -88,46 +120,69 @@ async def _can_self_apply_ib(db: AsyncSession, user_id: UUID) -> bool:
     Super IB) — may self-apply to become a full IB. A user introduced by any
     other IB/affiliate is shown only a "Contact SwisDex to become an IB"
     prompt instead of the self-apply flow."""
-    u = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
-    if u is None:
-        return False
-    ref_id = getattr(u, "referred_by_user_id", None)
-    if ref_id is None:
-        return True  # no referral → sits under the Super IB → can apply
+    introducer_id = await _get_introducer_user_id(db, user_id)
+    if introducer_id is None:
+        return True  # no introducer → sits under the Super IB → can apply
     super_id = await _get_super_ib_profile_id(db)
     if super_id is None:
         return True  # no Super IB configured yet → don't block applications
     super_prof = (await db.execute(
         select(IBProfile).where(IBProfile.id == super_id)
     )).scalar_one_or_none()
-    return super_prof is not None and super_prof.user_id == ref_id
+    return super_prof is not None and super_prof.user_id == introducer_id
+
+
+async def _kyc_approved(db: AsyncSession, user_id: UUID) -> bool:
+    """KYC must be cleared before a user can become an IB or Sub-IB (client
+    2026-06-29). Treat both 'approved' and 'verified' as cleared, matching the
+    rest of the gateway (profile_service)."""
+    kyc = (await db.execute(
+        select(User.kyc_status).where(User.id == user_id)
+    )).scalar_one_or_none()
+    return (kyc or "pending").lower() in ("approved", "verified")
 
 
 async def _ib_pool_and_active(db: AsyncSession, ib_user_id: UUID) -> tuple[float, int, int]:
     """Returns (deposit_pool_usd, active_users, total_referred) for an IB's
-    direct downline (client 2026-06-19: the IB should see how much its users
-    have collectively deposited and how many are active, which drives the
-    per-lot commission tier). 'Active' = a referred user with >=1 approved
-    deposit (funded)."""
+    direct downline. The pool counts approved deposits PLUS admin manual
+    credits (Transaction type 'adjustment', positive) — client 2026-06-30:
+    "deposit aur admin credit dono" should fund the IB pool / drive the tier.
+    'Active' = a referred user funded by a deposit OR an admin credit."""
     referred = (await db.execute(
         select(Referral.referred_id).where(Referral.referrer_id == ib_user_id)
     )).scalars().all()
     total_referred = len(referred)
     if not referred:
         return 0.0, 0, 0
-    pool = (await db.execute(
+    deposits_sum = (await db.execute(
         select(func.coalesce(func.sum(Deposit.amount), 0)).where(
             Deposit.user_id.in_(referred),
             Deposit.status.in_(["approved", "auto_approved"]),
         )
     )).scalar() or 0
-    active = (await db.execute(
-        select(func.count(func.distinct(Deposit.user_id))).where(
+    credits_sum = (await db.execute(
+        select(func.coalesce(func.sum(Transaction.amount), 0)).where(
+            Transaction.user_id.in_(referred),
+            Transaction.type == "adjustment",
+            Transaction.amount > 0,
+        )
+    )).scalar() or 0
+    pool = float(deposits_sum) + float(credits_sum)
+    dep_users = set((await db.execute(
+        select(func.distinct(Deposit.user_id)).where(
             Deposit.user_id.in_(referred),
             Deposit.status.in_(["approved", "auto_approved"]),
         )
-    )).scalar() or 0
-    return float(pool), int(active), total_referred
+    )).scalars().all())
+    cred_users = set((await db.execute(
+        select(func.distinct(Transaction.user_id)).where(
+            Transaction.user_id.in_(referred),
+            Transaction.type == "adjustment",
+            Transaction.amount > 0,
+        )
+    )).scalars().all())
+    active = len(dep_users | cred_users)
+    return pool, active, total_referred
 
 
 async def ib_status(user_id: UUID, db: AsyncSession) -> dict:
@@ -168,10 +223,16 @@ async def ib_status(user_id: UUID, db: AsyncSession) -> dict:
     # an unexplained disabled button.
     min_deposit = await _get_ib_min_deposit_usd()
     total_deposits = await _get_user_total_deposits(user_id, db)
+    # KYC must be cleared before applying (client 2026-06-29). is_eligible now
+    # requires BOTH the min deposit AND KYC, so the apply button stays disabled
+    # until both are done; kyc_approved is surfaced so the UI can say which gate
+    # is still open.
+    kyc_ok = await _kyc_approved(db, user_id)
     eligibility = {
         "min_deposit_required_usd": min_deposit,
         "total_deposits_usd": total_deposits,
-        "is_eligible": total_deposits >= min_deposit,
+        "kyc_approved": kyc_ok,
+        "is_eligible": total_deposits >= min_deposit and kyc_ok,
     }
     # Whether this user may use the self-apply flow at all, or only see the
     # "Contact SwisDex to become an IB" prompt (client 2026-06-19).
@@ -217,6 +278,13 @@ async def apply_ib(user_id: UUID, application_data: dict | None, db: AsyncSessio
             status_code=403,
             detail="Direct IB applications are open only to users introduced by SwisDex. "
                    "Please contact SwisDex to become an IB.",
+        )
+
+    # KYC gate (client 2026-06-29): must be KYC-approved before becoming an IB.
+    if not await _kyc_approved(db, user_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Please complete KYC verification before applying to become an IB.",
         )
 
     # Minimum-deposit gate. Admin sets the threshold via system_settings →
@@ -266,6 +334,13 @@ async def apply_sub_broker(user_id: UUID, application_data: dict | None, db: Asy
     )
     if existing_profile.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="You already have a business profile")
+
+    # KYC gate (client 2026-06-29): KYC-approved required before becoming a Sub-IB.
+    if not await _kyc_approved(db, user_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Please complete KYC verification before applying to become a Sub-IB.",
+        )
 
     # Same min-deposit gate as IB — sub-broker is just a higher tier of IB.
     min_deposit = await _get_ib_min_deposit_usd()
@@ -596,11 +671,16 @@ async def ib_tree(user_id: UUID, max_depth: int, db: AsyncSession) -> dict:
     # not. Sub-IB profile info is LEFT-joined so the existing UI
     # (referral_code, sub-IB level, total_earned per node) keeps
     # rendering when the downline node IS an IB.
+    # Direct children come from EITHER referred_by_user_id (personal code) OR a
+    # Referral row pointing at this IB's profile (IB code/link signups, which
+    # leave referred_by_user_id NULL — they showed in the Sub-Broker clients
+    # list but were missing from My Network; client 2026-06-24). For the latter
+    # we coalesce their parent to this IB so they attach under the root.
     cte_query = text("""
         WITH RECURSIVE network AS (
             SELECT
                 u.id AS user_id,
-                u.referred_by_user_id AS parent_user_id,
+                COALESCE(u.referred_by_user_id, :root_user_id) AS parent_user_id,
                 u.email, u.first_name, u.last_name,
                 ip.id AS ib_profile_id,
                 ip.referral_code, ip.level AS ib_level,
@@ -610,6 +690,10 @@ async def ib_tree(user_id: UUID, max_depth: int, db: AsyncSession) -> dict:
             FROM users u
             LEFT JOIN ib_profiles ip ON ip.user_id = u.id
             WHERE u.referred_by_user_id = :root_user_id
+               OR u.id IN (
+                    SELECT r.referred_id FROM referrals r
+                    WHERE r.ib_profile_id = :root_ib_profile_id
+               )
 
             UNION ALL
 
@@ -631,7 +715,11 @@ async def ib_tree(user_id: UUID, max_depth: int, db: AsyncSession) -> dict:
 
     result = await db.execute(
         cte_query,
-        {"root_user_id": str(user_id), "max_depth": max_depth},
+        {
+            "root_user_id": str(user_id),
+            "root_ib_profile_id": str(profile.id),
+            "max_depth": max_depth,
+        },
     )
     rows = result.fetchall()
 
@@ -712,37 +800,50 @@ async def sub_broker_dashboard(user_id: UUID, db: AsyncSession) -> dict:
     if not profile:
         raise HTTPException(status_code=404, detail="Sub-broker profile not found")
 
-    direct_referrals = await db.execute(
-        select(func.count()).select_from(Referral).where(Referral.ib_profile_id == profile.id)
-    )
-    direct_count = direct_referrals.scalar()
+    # The Sub-Broker view lists only this IB's SUB-IBs — downline whose own
+    # IBProfile sits directly under this profile (parent_ib_id == profile.id),
+    # i.e. they classify as 'sub_ib'. Two cases are deliberately excluded and
+    # belong in My Network instead (client 2026-06-29):
+    #   - a plain referred trader who never became an IB (no child IBProfile);
+    #   - a user the SUPER IB referred who became an IB — they are a FULL IB
+    #     (_resolve_ib_type: a child of the Super IB is 'ib', not 'sub_ib'),
+    #     so the Super IB's sub-broker list is empty.
+    super_id = await _get_super_ib_profile_id(db)
+    is_super = super_id is not None and profile.id == super_id
 
-    client_result = await db.execute(
-        select(
-            Referral.referred_id, User.email, User.first_name, User.last_name,
-            User.status, User.kyc_status, User.created_at,
-        )
-        .join(User, Referral.referred_id == User.id)
-        .where(Referral.ib_profile_id == profile.id)
-        .order_by(Referral.created_at.desc()).limit(50)
-    )
-    clients = client_result.all()
+    client_list: list[dict] = []
+    direct_count = 0
+    if not is_super:
+        direct_count = (await db.execute(
+            select(func.count()).select_from(IBProfile).where(
+                IBProfile.parent_ib_id == profile.id, IBProfile.is_active == True,
+            )
+        )).scalar() or 0
 
-    client_list = []
-    for referred_id, email, fname, lname, status, kyc, joined in clients:
-        acct_result = await db.execute(
-            select(func.count(), func.coalesce(func.sum(TradingAccount.balance), 0))
-            .where(TradingAccount.user_id == referred_id)
-        )
-        acct_stats = acct_result.one()
-        client_list.append({
-            "user_id": str(referred_id), "email": email,
-            "name": f"{fname or ''} {lname or ''}".strip(),
-            "status": status, "kyc_status": kyc,
-            "accounts_count": acct_stats[0],
-            "total_balance": float(acct_stats[1]),
-            "joined_at": joined.isoformat() if joined else None,
-        })
+        client_rows = (await db.execute(
+            select(
+                IBProfile.user_id, User.email, User.first_name, User.last_name,
+                User.status, User.kyc_status, User.created_at,
+            )
+            .join(User, IBProfile.user_id == User.id)
+            .where(IBProfile.parent_ib_id == profile.id, IBProfile.is_active == True)
+            .order_by(IBProfile.created_at.desc()).limit(50)
+        )).all()
+
+        for referred_id, email, fname, lname, status, kyc, joined in client_rows:
+            acct_result = await db.execute(
+                select(func.count(), func.coalesce(func.sum(TradingAccount.balance), 0))
+                .where(TradingAccount.user_id == referred_id)
+            )
+            acct_stats = acct_result.one()
+            client_list.append({
+                "user_id": str(referred_id), "email": email,
+                "name": f"{fname or ''} {lname or ''}".strip(),
+                "status": status, "kyc_status": kyc,
+                "accounts_count": acct_stats[0],
+                "total_balance": float(acct_stats[1]),
+                "joined_at": joined.isoformat() if joined else None,
+            })
 
     total_comm = await db.execute(
         select(func.coalesce(func.sum(IBCommission.amount), 0)).where(IBCommission.ib_id == profile.id)

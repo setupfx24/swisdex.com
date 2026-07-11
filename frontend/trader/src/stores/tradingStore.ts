@@ -14,6 +14,61 @@ export function defaultContractSize(symbol: string): number {
   return 100000;
 }
 
+/**
+ * Live floating P&L for one position, valued at the tick MID (the same
+ * "user close quote" basis the backend uses). SINGLE source of truth shared by
+ * the tick handler AND the positions refresh — so a refresh recomputes the
+ * live number instead of slamming it to the server's `profit` (often 0/stale),
+ * which was the ~1s "P&L flickers to zero" flash. Returns null when there's no
+ * usable tick, so the caller keeps whatever value it already had.
+ */
+export function livePnlFor(
+  pos: { side: string; open_price: number; lots: number; effective_lots?: number },
+  tick: { bid: number; ask: number } | undefined | null,
+  instruments: Array<{ symbol: string; contract_size?: number | null; base_currency?: string | null; quote_currency?: string | null }>,
+  symbol: string,
+): { cp: number; pnl: number } | null {
+  if (!tick) return null;
+  const sym = (symbol || '').trim().toUpperCase();
+  // Value P&L at the tick MID (bid+ask)/2 — the calc validated as correct. The
+  // profit→negative→profit "flicker" was NOT this math; it was the 1.5s REST
+  // price poll clobbering the fresh WS bid with a round-trip-stale value (fixed
+  // by the tick freshness guard in updatePrice — see lastAppliedTickTs below).
+  const cp = (tick.bid > 0 && tick.ask > 0)
+    ? (tick.bid + tick.ask) / 2
+    : (pos.side === 'buy' ? tick.bid : tick.ask);
+  if (!(cp > 0)) return null;
+  const inst =
+    instruments.find((i) => i.symbol === sym) ||
+    instruments.find((i) => String(i.symbol).toUpperCase() === sym);
+  const cs = inst?.contract_size || defaultContractSize(sym);
+  const pnlLots = pos.effective_lots ?? pos.lots;
+  let pnl = pos.side === 'buy'
+    ? (cp - pos.open_price) * pnlLots * cs
+    : (pos.open_price - cp) * pnlLots * cs;
+  const base = (inst?.base_currency || (sym.length >= 6 ? sym.slice(0, 3) : '')).toUpperCase();
+  const quote = (inst?.quote_currency || (sym.length >= 6 ? sym.slice(3, 6) : '')).toUpperCase();
+  if (quote && quote !== 'USD' && base === 'USD' && cp) {
+    pnl = pnl / cp;
+  }
+  return { cp, pnl };
+}
+
+// ─── Live-price freshness guard (fixes the P&L flicker WITHOUT freezing it) ───
+// Two sources write prices: the live WS (/ws/prices, bursty — gaps up to ~2.5s)
+// and the 1.5s REST poll (/instruments/prices/all). The poll's value is
+// round-trip-stale, so applying it right after a fresher WS tick snapped the P&L
+// backward for one frame — the reported profit→negative→profit flicker. Ticks
+// carry a millisecond server timestamp; we ignore one whose ts is older/equal to
+// the last APPLIED tick for that symbol (also drops duplicate re-publishes, which
+// carry the same value). We never freeze: if nothing fresh arrived for
+// STALE_TICK_GRACE_MS we let even a stale value through, so a dead WS falls back
+// to the poll. Centralised here so every caller (trading layout + trade panel,
+// each WS + poll) is covered. (client 2026-07-10)
+const lastAppliedTickTs = new Map<string, number>();   // last applied server ts (epoch ms)
+const lastAppliedTickWall = new Map<string, number>(); // wall-clock of last apply (epoch ms)
+const STALE_TICK_GRACE_MS = 3000;
+
 export interface TickData {
   symbol: string;
   bid: number;
@@ -227,33 +282,44 @@ export const useTradingStore = create<TradingState>()((set, get) => ({
     try {
       const positions = await api.get<any[]>(`/positions/`, { account_id: account.id, status: 'open' });
       const list = Array.isArray(positions) ? positions : [];
+      // Latest ticks/instruments so we can value each refreshed position at the
+      // live MID immediately — otherwise the server's `profit` (often 0/stale
+      // for a freshly-opened position) shows for ~1s until the next tick,
+      // which is the "P&L flickers to zero" flash.
+      const livePrices = get().prices;
+      const liveInstruments = get().instruments;
       set({
-        positions: list.map((p: any) => ({
-          id: p.id,
-          account_id: p.account_id,
-          symbol: p.symbol || '',
-          side: p.side,
-          lots: Number(p.lots) || 0,
-          // Engine lots (0.0001 on a cent account). MUST be carried through
-          // or the live P&L recompute below falls back to display `lots`
-          // and a cent position's P&L jumps 100×. Was being dropped here.
-          effective_lots: p.effective_lots != null ? Number(p.effective_lots) : undefined,
-          open_price: Number(p.open_price) || 0,
-          current_price: p.current_price != null ? Number(p.current_price) : undefined,
-          stop_loss: p.stop_loss != null ? Number(p.stop_loss) : undefined,
-          take_profit: p.take_profit != null ? Number(p.take_profit) : undefined,
-          swap: Number(p.swap) || 0,
-          commission: Number(p.commission) || 0,
-          profit: Number(p.profit) || 0,
-          trade_type: p.trade_type,
-          created_at: p.created_at,
-          // Insurance markers — without these the badge ALWAYS reads
-          // "Not insured" and the countdown never renders (the backend
-          // sends them; the mapper was silently discarding them).
-          insurance_activated_at: p.insurance_activated_at ?? null,
-          insurance_eligible_at: p.insurance_eligible_at ?? null,
-          insurance_expires_at: p.insurance_expires_at ?? null,
-        })),
+        positions: list.map((p: any) => {
+          const mapped = {
+            id: p.id,
+            account_id: p.account_id,
+            symbol: p.symbol || '',
+            side: p.side,
+            lots: Number(p.lots) || 0,
+            // Engine lots (0.0001 on a cent account). MUST be carried through
+            // or the live P&L recompute below falls back to display `lots`
+            // and a cent position's P&L jumps 100×. Was being dropped here.
+            effective_lots: p.effective_lots != null ? Number(p.effective_lots) : undefined,
+            open_price: Number(p.open_price) || 0,
+            current_price: p.current_price != null ? Number(p.current_price) : undefined,
+            stop_loss: p.stop_loss != null ? Number(p.stop_loss) : undefined,
+            take_profit: p.take_profit != null ? Number(p.take_profit) : undefined,
+            swap: Number(p.swap) || 0,
+            commission: Number(p.commission) || 0,
+            profit: Number(p.profit) || 0,
+            trade_type: p.trade_type,
+            created_at: p.created_at,
+            // Insurance markers — without these the badge ALWAYS reads
+            // "Not insured" and the countdown never renders (the backend
+            // sends them; the mapper was silently discarding them).
+            insurance_activated_at: p.insurance_activated_at ?? null,
+            insurance_eligible_at: p.insurance_eligible_at ?? null,
+            insurance_expires_at: p.insurance_expires_at ?? null,
+          };
+          const sym = (mapped.symbol || '').trim().toUpperCase();
+          const r = livePnlFor(mapped, livePrices[sym], liveInstruments, sym);
+          return r ? { ...mapped, current_price: r.cp, profit: r.pnl } : mapped;
+        }),
       });
     } catch {}
   },
@@ -311,6 +377,24 @@ export const useTradingStore = create<TradingState>()((set, get) => ({
     const sym = String(tick.symbol || '').trim().toUpperCase();
     if (!sym) return state;
     const normalized: TickData = { ...tick, symbol: sym };
+
+    // Freshness guard (see lastAppliedTickTs above): drop the round-trip-stale
+    // REST-poll value (or a duplicate re-publish) that flashed the P&L backward,
+    // but only while a fresher tick is recent — after STALE_TICK_GRACE_MS of
+    // silence, let it through so a dead socket falls back to the poll (no freeze).
+    const nowWall = Date.now();
+    const ts = Date.parse(normalized.timestamp);
+    const prevTs = lastAppliedTickTs.get(sym);
+    const prevWall = lastAppliedTickWall.get(sym) ?? 0;
+    if (Number.isFinite(ts) && prevTs !== undefined && ts <= prevTs
+        && nowWall - prevWall < STALE_TICK_GRACE_MS) {
+      return state; // stale/duplicate while a fresher value is live — ignore
+    }
+    lastAppliedTickWall.set(sym, nowWall);
+    if (Number.isFinite(ts) && (prevTs === undefined || ts > prevTs)) {
+      lastAppliedTickTs.set(sym, ts);
+    }
+
     const prev = state.prices[sym];
     return {
       prevPrices: prev
@@ -320,33 +404,12 @@ export const useTradingStore = create<TradingState>()((set, get) => ({
       positions: state.positions.map((pos) => {
         const pSym = String(pos.symbol || '').trim().toUpperCase();
         if (pSym !== sym) return pos;
-        const cp = pos.side === 'buy' ? normalized.bid : normalized.ask;
-        const inst =
-          state.instruments.find((i) => i.symbol === sym) ||
-          state.instruments.find((i) => String(i.symbol).toUpperCase() === sym);
-        const cs = inst?.contract_size || defaultContractSize(sym);
-        // Use ENGINE lots (effective_lots), not the display lots, so a
-        // cent position's live P&L matches the backend instead of
-        // jumping 100× on every tick. Falls back to display lots for
-        // standard accounts / legacy payloads where they're equal.
-        const pnlLots = pos.effective_lots ?? pos.lots;
-        let pnl = pos.side === 'buy'
-          ? (cp - pos.open_price) * pnlLots * cs
-          : (pos.open_price - cp) * pnlLots * cs;
-        // Forex P&L formula yields a value in the QUOTE currency. Convert to
-        // the account currency (USD) so e.g. USDJPY shows ~$0.006 instead of
-        // 1 JPY rendered as "$1". For pairs already quoted in USD (EURUSD,
-        // GBPUSD, XAUUSD, BTCUSD…) this is a no-op.
-        const base = (inst?.base_currency || (sym.length >= 6 ? sym.slice(0, 3) : '')).toUpperCase();
-        const quote = (inst?.quote_currency || (sym.length >= 6 ? sym.slice(3, 6) : '')).toUpperCase();
-        if (quote && quote !== 'USD') {
-          if (base === 'USD' && cp) {
-            pnl = pnl / cp;
-          }
-          // cross pair (no USD on either side) — leave raw until we have a
-          // cross-rate feed; backend will reconcile on close.
-        }
-        return { ...pos, current_price: cp, profit: pnl };
+        // Value floating P&L at the tick MID via the shared helper (same
+        // "user close quote" basis the backend uses) — keeps the frontend in
+        // lockstep with the backend so the number doesn't snap on refresh.
+        const r = livePnlFor(pos, normalized, state.instruments, sym);
+        if (!r) return pos;
+        return { ...pos, current_price: r.cp, profit: r.pnl };
       }),
     };
   }),

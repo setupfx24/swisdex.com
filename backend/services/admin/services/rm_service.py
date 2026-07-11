@@ -332,6 +332,61 @@ async def list_rms(db: AsyncSession) -> dict:
     return {"rms": out}
 
 
+async def list_manual_requests(db: AsyncSession, status_filter: str | None = None) -> dict:
+    """Trader-submitted 'Request to RM' deposit/withdraw requests (migration
+    0093) so admin sees them in the panel, not just the RM's inbox."""
+    from packages.common.src.models import RmManualRequest
+    q = select(RmManualRequest).order_by(RmManualRequest.created_at.desc())
+    if status_filter and status_filter != "all":
+        q = q.where(RmManualRequest.status == status_filter)
+    rows = (await db.execute(q.limit(500))).scalars().all()
+    uids = [r.user_id for r in rows if r.user_id]
+    umap: dict = {}
+    if uids:
+        for uid, fn, ln, em in (await db.execute(
+            select(User.id, User.first_name, User.last_name, User.email).where(User.id.in_(uids))
+        )).all():
+            umap[uid] = {"name": (f"{fn or ''} {ln or ''}".strip() or em), "email": em}
+    return {"items": [
+        {
+            "id": str(r.id),
+            "user_id": str(r.user_id) if r.user_id else None,
+            "user_name": umap.get(r.user_id, {}).get("name"),
+            "user_email": umap.get(r.user_id, {}).get("email"),
+            "side": r.side,
+            "amount": float(r.amount or 0),
+            "method": r.method,
+            "phone": r.phone,
+            "payout_details": r.payout_details,
+            "note": r.note,
+            "status": r.status,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        }
+        for r in rows
+    ]}
+
+
+async def set_manual_request_status(
+    req_id: uuid.UUID, status: str, admin_id: uuid.UUID, ip_address: str | None, db: AsyncSession,
+) -> dict:
+    from packages.common.src.models import RmManualRequest
+    allowed = {"new", "contacted", "done", "cancelled"}
+    if status not in allowed:
+        raise HTTPException(status_code=400, detail=f"status must be one of {sorted(allowed)}")
+    r = (await db.execute(
+        select(RmManualRequest).where(RmManualRequest.id == req_id)
+    )).scalar_one_or_none()
+    if not r:
+        raise HTTPException(status_code=404, detail="Request not found")
+    r.status = status
+    await write_audit_log(
+        db, admin_id, "rm_manual_request_status", "rm_manual_request", r.id,
+        new_values={"status": status}, ip_address=ip_address,
+    )
+    await db.commit()
+    return {"id": str(req_id), "status": status}
+
+
 async def assign_user(user_id: uuid.UUID, rm_id: uuid.UUID | None, admin_id: uuid.UUID,
                       ip_address: str | None, db: AsyncSession) -> dict:
     user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()

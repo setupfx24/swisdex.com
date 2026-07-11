@@ -10,6 +10,7 @@ import { useTradingStore } from '@/stores/tradingStore';
 import { Button } from '@/components/ui/Button';
 import DashboardShell from '@/components/layout/DashboardShell';
 import LinkedWalletCard from '@/components/profile/LinkedWalletCard';
+import DOBPicker from '@/components/forms/DOBPicker';
 import api from '@/lib/api/client';
 
 interface Profile {
@@ -23,6 +24,7 @@ interface Profile {
   city?: string | null;
   state?: string | null;
   postal_code?: string | null;
+  date_of_birth?: string | null;
   kyc_status: string;
   two_factor_enabled: boolean;
   /** Registration date — shown as "Member since" (B2-6). */
@@ -67,6 +69,7 @@ export default function ProfilePage() {
   const [city, setCity] = useState('');
   const [state, setState] = useState('');
   const [postal, setPostal] = useState('');
+  const [dob, setDob] = useState('');
   const [savingProfile, setSavingProfile] = useState(false);
 
   // Password form
@@ -153,6 +156,7 @@ export default function ProfilePage() {
       setCity((data.city ?? '').trim());
       setState((data.state ?? '').trim());
       setPostal((data.postal_code ?? '').trim());
+      setDob((data.date_of_birth ?? '').slice(0, 10));
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to load profile');
     } finally { setLoading(false); }
@@ -174,6 +178,7 @@ export default function ProfilePage() {
       await api.put('/profile', {
         first_name: firstName, last_name: lastName,
         phone, country, address, city, state, postal_code: postal,
+        date_of_birth: dob || null,
       });
       toast.success('Profile updated successfully!');
       fetchProfile();
@@ -222,6 +227,8 @@ export default function ProfilePage() {
     ? 'DA'
     : (`${(profile?.first_name?.[0] ?? '').toUpperCase()}${(profile?.last_name?.[0] ?? '').toUpperCase()}` || 'U');
   const username = isDemo ? 'demo' : (profile?.email ? profile.email.split('@')[0] : '');
+  // Identity is editable until KYC is approved, then locked (client 2026-06-23).
+  const kycLocked = !isDemo && (profile?.kyc_status === 'approved' || profile?.kyc_status === 'verified');
 
   const inputCls =
     'w-full bg-bg-secondary border border-border-primary rounded-xl py-3 px-4 text-sm text-text-primary focus:outline-none focus:border-accent/50 focus:ring-1 focus:ring-accent/20 transition-colors placeholder:text-text-tertiary disabled:opacity-50 disabled:cursor-not-allowed';
@@ -351,16 +358,31 @@ export default function ProfilePage() {
                     />
                   </div>
 
+                  {kycLocked && (
+                    <div className="rounded-lg bg-amber-500/10 border border-amber-500/30 px-3 py-2 text-[11px] text-amber-600">
+                      Your profile is locked after KYC approval. Contact support to change verified details.
+                    </div>
+                  )}
+
                   {/* Name row */}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div>
                       <label className={labelCls}>First Name</label>
-                      <input type="text" value={firstName} onChange={(e) => setFirstName(e.target.value)} className={inputCls} />
+                      <input type="text" value={firstName} onChange={(e) => setFirstName(e.target.value)} disabled={kycLocked} className={inputCls} />
                     </div>
                     <div>
                       <label className={labelCls}>Last Name</label>
-                      <input type="text" value={lastName} onChange={(e) => setLastName(e.target.value)} className={inputCls} />
+                      <input type="text" value={lastName} onChange={(e) => setLastName(e.target.value)} disabled={kycLocked} className={inputCls} />
                     </div>
+                  </div>
+
+                  {/* Date of Birth — editable until KYC approval (client 2026-06-23).
+                      Custom DOBPicker (not native <input type=date>) so the
+                      calendar starts each month at the 1st with no trailing
+                      prev/next-month days (client 2026-06-24). */}
+                  <div>
+                    <label className={labelCls}>Date of Birth</label>
+                    <DOBPicker value={dob} onChange={setDob} disabled={kycLocked} />
                   </div>
 
                   {/* Email + Phone */}
@@ -376,25 +398,25 @@ export default function ProfilePage() {
                     </div>
                     <div>
                       <label className={labelCls}>Phone Number</label>
-                      <input type="tel" value={phone} onChange={(e) => setPhone(e.target.value)} className={inputCls} />
+                      <input type="tel" value={phone} onChange={(e) => setPhone(e.target.value)} disabled={kycLocked} className={inputCls} />
                     </div>
                   </div>
 
                   {/* Street address */}
                   <div>
                     <label className={labelCls}>Street Address</label>
-                    <input type="text" value={address} onChange={(e) => setAddress(e.target.value)} placeholder="House number, street" className={inputCls} />
+                    <input type="text" value={address} onChange={(e) => setAddress(e.target.value)} placeholder="House number, street" disabled={kycLocked} className={inputCls} />
                   </div>
 
                   {/* City + State */}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div>
                       <label className={labelCls}>City</label>
-                      <input type="text" value={city} onChange={(e) => setCity(e.target.value)} className={inputCls} />
+                      <input type="text" value={city} onChange={(e) => setCity(e.target.value)} disabled={kycLocked} className={inputCls} />
                     </div>
                     <div>
                       <label className={labelCls}>State / Province</label>
-                      <input type="text" value={state} onChange={(e) => setState(e.target.value)} className={inputCls} />
+                      <input type="text" value={state} onChange={(e) => setState(e.target.value)} disabled={kycLocked} className={inputCls} />
                     </div>
                   </div>
 
@@ -402,11 +424,11 @@ export default function ProfilePage() {
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div>
                       <label className={labelCls}>Postal / Zip Code</label>
-                      <input type="text" value={postal} onChange={(e) => setPostal(e.target.value)} className={inputCls} placeholder="" />
+                      <input type="text" value={postal} onChange={(e) => setPostal(e.target.value)} disabled={kycLocked} className={inputCls} placeholder="" />
                     </div>
                     <div>
                       <label className={labelCls}>Country</label>
-                      <input type="text" value={country} onChange={(e) => setCountry(e.target.value)} className={inputCls} placeholder="e.g. India" />
+                      <input type="text" value={country} onChange={(e) => setCountry(e.target.value)} disabled={kycLocked} className={inputCls} placeholder="e.g. India" />
                     </div>
                   </div>
 
@@ -425,11 +447,13 @@ export default function ProfilePage() {
                     </div>
                   )}
 
-                  <div className="flex justify-end pt-1">
-                    <Button variant="primary" onClick={handleSaveProfile} loading={savingProfile}>
-                      Save Changes
-                    </Button>
-                  </div>
+                  {!kycLocked && (
+                    <div className="flex justify-end pt-1">
+                      <Button variant="primary" onClick={handleSaveProfile} loading={savingProfile}>
+                        Save Changes
+                      </Button>
+                    </div>
+                  )}
                 </div>
               )}
             </div>

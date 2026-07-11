@@ -23,6 +23,7 @@ import {
   History,
   DollarSign,
   Hourglass,
+  Download,
 } from 'lucide-react';
 import {
   type Transaction,
@@ -33,6 +34,8 @@ import {
   transactionTitle,
   PAGE_SIZES,
 } from '@/lib/wallet/transactionHistoryModel';
+import { downloadTransactionStatementPdf } from '@/lib/pdf/transactionStatementPdf';
+import { useAuthStore } from '@/stores/authStore';
 import TradesSection from './TradesSection';
 
 interface WalletSummaryResponse {
@@ -43,6 +46,7 @@ interface WalletSummaryResponse {
 }
 
 export default function TransactionsPage() {
+  const user = useAuthStore((s) => s.user);
   const [mainTab, setMainTab] = useState<'transactions' | 'trades'>('transactions');
   const [currency, setCurrency] = useState('USD');
   const [totalDeposited, setTotalDeposited] = useState(0);
@@ -150,6 +154,37 @@ export default function TransactionsPage() {
     setPage(1);
   };
 
+  // Download a PDF statement of the CURRENTLY-FILTERED transactions (client
+  // 2026-06-19): respects the type filter (All / Deposits / Withdrawals / …)
+  // and the custom date range the user picked above.
+  const downloadStatement = () => {
+    if (!filteredTx.length) {
+      toast.error('No transactions to export for the current filters');
+      return;
+    }
+    const kindLabel =
+      typeFilter === 'deposit' ? 'Deposits' :
+      typeFilter === 'withdrawal' ? 'Withdrawals' :
+      typeFilter === 'all' ? 'Transaction' :
+      `${transactionTitle({ type: typeFilter } as Transaction)} transactions`;
+    const periodLabel =
+      dateFrom || dateTo
+        ? `${dateFrom || 'start'} → ${dateTo || 'today'}`
+        : 'All time';
+    const fullName = [user?.first_name, user?.last_name].filter(Boolean).join(' ').trim();
+    try {
+      void downloadTransactionStatementPdf(filteredTx, {
+        userName: fullName || undefined,
+        userEmail: user?.email || undefined,
+        userId: user?.id || undefined,
+        kindLabel,
+        periodLabel,
+      });
+    } catch {
+      toast.error('Could not generate the statement');
+    }
+  };
+
   if (loading) {
     return (
       <DashboardShell mainClassName="p-0 flex flex-col min-h-0 overflow-hidden">
@@ -179,18 +214,29 @@ export default function TransactionsPage() {
               </p>
             </div>
             {mainTab === 'transactions' && (
-              <button
-                type="button"
-                onClick={() => void fetchData(true)}
-                disabled={refreshing}
-                className={clsx(
-                  'shrink-0 p-2 rounded-lg border border-border-primary bg-card hover:bg-bg-hover transition-all',
-                  refreshing && 'opacity-50 cursor-not-allowed',
-                )}
-                aria-label="Refresh"
-              >
-                <RefreshCcw className={clsx('w-4 h-4 text-text-secondary', refreshing && 'animate-spin')} />
-              </button>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={downloadStatement}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-border-primary bg-card hover:bg-bg-hover transition-all text-xs sm:text-sm font-semibold text-text-primary"
+                  title="Download a PDF statement of the filtered transactions"
+                >
+                  <Download className="w-4 h-4 text-[#55a630]" />
+                  <span className="hidden sm:inline">Download statement</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void fetchData(true)}
+                  disabled={refreshing}
+                  className={clsx(
+                    'p-2 rounded-lg border border-border-primary bg-card hover:bg-bg-hover transition-all',
+                    refreshing && 'opacity-50 cursor-not-allowed',
+                  )}
+                  aria-label="Refresh"
+                >
+                  <RefreshCcw className={clsx('w-4 h-4 text-text-secondary', refreshing && 'animate-spin')} />
+                </button>
+              </div>
             )}
           </div>
 

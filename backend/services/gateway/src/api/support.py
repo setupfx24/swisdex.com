@@ -16,6 +16,9 @@ class CreateTicketRequest(BaseModel):
     subject: str = Field(min_length=1, max_length=255)
     message: str = Field(min_length=1)
     priority: str = Field(default="medium", pattern="^(low|medium|high|urgent)$")
+    # Optional inline attachments (base64 data URLs), same shape as replies —
+    # the trader form sends these on the FIRST message too (client 2026-07-08).
+    attachments: list | None = None
 
 
 class ReplyTicketRequest(BaseModel):
@@ -45,7 +48,8 @@ async def create_ticket(
 ):
     return await support_service.create_ticket(
         user_id=current_user["user_id"], subject=req.subject,
-        message=req.message, priority=req.priority, db=db,
+        message=req.message, priority=req.priority,
+        attachments=req.attachments, db=db,
     )
 
 

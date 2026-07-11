@@ -308,7 +308,7 @@ function AccountBalanceCard({
             Details
           </Link>
           <Link
-            href="/risk-management/calculator"
+            href="/risk-calculator"
             className="inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm font-semibold transition-colors hover:bg-bg-hover"
             style={{ border: '1px solid var(--border-primary)', color: 'var(--text-primary)' }}
           >

@@ -14,8 +14,11 @@ def render_first_deposit_bonus_offer(
     bonus_pct: int = 100,
 ) -> tuple[str, str, str]:
     name = (first_name or "trader").strip() or "trader"
+    # The layout HTML-escapes `intro`, so any tags here render as literal text
+    # (the "<strong>...</strong>" the client saw). Keep intro plain — emphasis
+    # belongs in body_html, which is not escaped.
     intro = (
-        f"You're eligible for a <strong>{bonus_pct}% bonus</strong> on your "
+        f"You're eligible for a {bonus_pct}% bonus on your "
         "first deposit — but you haven't funded your wallet yet. "
         "Deposit any amount and we'll instantly match it up to the cap."
     )

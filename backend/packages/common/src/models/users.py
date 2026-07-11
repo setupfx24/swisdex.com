@@ -29,6 +29,11 @@ class User(Base):
     postal_code = Column(String(20))
     role = Column(String(20), default="user")
     status = Column(String(20), default="active")
+    # Promotional / pilot user (client 2026-07-03): admin flags the WHOLE user as
+    # promotional. Everything shows on the user's own dashboard as normal, but ALL
+    # their activity (every account's trades/deposits/withdrawals + user-scoped
+    # FR / referral / IB / bonus) is EXCLUDED from admin's real company financials.
+    is_promotional = Column(Boolean, default=False, server_default="false", nullable=False)
     kyc_status = Column(String(20), default="pending")
     # KYC reminder cadence stage: 0 = none sent, 1 = 3-day reminder fired,
     # 2 = 7-day reminder fired (terminal — no further reminders).
@@ -41,6 +46,10 @@ class User(Base):
     # for fast lookup at reward-application time). Gated by
     # system_settings.vip_pass_enabled until token economics land.
     is_vip = Column(Boolean, default=False, server_default="false")
+    # Per-user bank/manual deposit visibility (client 2026-06-23): admin can
+    # show the bank deposit option to specific clients only. NULL = follow the
+    # global wallet.manual_enabled toggle; True/False = explicit per-user override.
+    bank_deposit_enabled = Column(Boolean, nullable=True)
     two_factor_enabled = Column(Boolean, default=False)
     two_factor_secret = Column(String(255))
     # Bcrypt-hashed single-use recovery codes shown to the user once at
@@ -111,6 +120,18 @@ class User(Base):
     referral_commission_balance = Column(
         Numeric(18, 8), nullable=False, default=0, server_default="0",
     )
+    # How THIS user (as a referrer) wants their AI-Powered-Staking referral
+    # commission paid (Migration 0084): 'principal' = a % of each referred
+    # user's principal once they lock; 'interest' = a % of each interest payout
+    # the referred user receives. The % values are admin settings.
+    fr_referral_mode = Column(
+        String(20), nullable=False, default="principal", server_default="principal",
+    )
+    # Per-referrer OVERRIDE of the FR referral commission % (migration 0090).
+    # NULL = fall back to the global fr_referral_principal_pct / _interest_pct
+    # setting for that leg; a value pins a custom rate for THIS referrer only.
+    fr_referral_principal_pct_override = Column(Numeric(8, 4), nullable=True)
+    fr_referral_interest_pct_override = Column(Numeric(8, 4), nullable=True)
     # Per-IB pool of accumulated trade commissions from the MLM chain.
     # Lives on the IB's user row. Increments inside the IB engine on
     # each qualifying trade; "Transfer to Main Wallet" on /business

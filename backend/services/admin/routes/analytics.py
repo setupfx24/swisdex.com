@@ -1,5 +1,9 @@
 from datetime import datetime, time, timezone
+from typing import Optional
+from uuid import UUID
+
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from packages.common.src.database import get_db
@@ -8,6 +12,13 @@ from packages.common.src.models import User
 from services import analytics_service
 
 router = APIRouter(prefix="/analytics", tags=["Analytics"])
+
+
+class PromotionalExpenseBody(BaseModel):
+    amount: float = Field(gt=0, description="Give-away amount in USD (must be > 0)")
+    category: Optional[str] = Field(default="manual", description="e.g. extra_fr_interest, custom_benefit, manual")
+    note: Optional[str] = None
+    user_id: Optional[UUID] = Field(default=None, description="Recipient user (optional)")
 
 
 def _parse_date_bound(value: str | None, *, end_of_day: bool) -> datetime | None:
@@ -56,7 +67,7 @@ async def finance_overview(
 
 @router.get("/finance-overview/drill")
 async def finance_overview_drill(
-    section: str = Query(..., description="deposits|withdrawals|pending_deposits|pending_withdrawals|net_credit|fixed_return|trading|commission|swap|pamm_mam|insurance_fees|insurance_payouts|ib_commission|referral"),
+    section: str = Query(..., description="deposits|withdrawals|pending_deposits|pending_withdrawals|net_credit|fixed_return|trading|commission|swap|pamm_mam|insurance_fees|insurance_payouts|ib_commission|referral|promotional_expenses"),
     method: str | None = Query(None, description="filter deposit/withdrawal rows by method"),
     tenure: str | None = Query(None, description="filter fixed_return locks by tenure label"),
     sort: str = Query("amount", description="amount | gainers | losers (trading only)"),
@@ -70,6 +81,29 @@ async def finance_overview_drill(
         db=db, section=section, method=method, tenure=tenure, sort=sort,
         start_date=_parse_date_bound(start_date, end_of_day=False),
         end_date=_parse_date_bound(end_date, end_of_day=True),
+    )
+
+
+@router.get("/promotional-expenses")
+async def list_promotional_expenses(
+    limit: int = Query(100, ge=1, le=500),
+    admin: User = Depends(require_permission("analytics.finance")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Recent MANUAL promotional-expense entries (super_admin only)."""
+    return await analytics_service.list_promotional_expenses(db=db, limit=limit)
+
+
+@router.post("/promotional-expenses")
+async def add_promotional_expense(
+    body: PromotionalExpenseBody,
+    admin: User = Depends(require_permission("analytics.finance")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Log a manual promotional give-away (super_admin only)."""
+    return await analytics_service.add_promotional_expense(
+        db=db, admin_id=admin.id, amount=body.amount,
+        category=body.category, note=body.note, user_id=body.user_id,
     )
 
 

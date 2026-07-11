@@ -44,6 +44,11 @@ async def list_employees(db: AsyncSession) -> dict:
             "user_id": str(emp.user_id),
             "role": emp.role,
             "is_active": emp.is_active,
+            # A soft-deleted employee keeps its row (so its info stays visible)
+            # but the linked user is demoted + terminated. Surface that as a
+            # distinct "deleted" flag so the UI shows "Deleted", not just
+            # "Inactive" (client 2026-06-20).
+            "deleted": (getattr(user, "status", None) == "terminated") if user else False,
             "created_at": emp.created_at.isoformat() if emp.created_at else None,
             "email": user.email if user else None,
             "full_name": full_name,
@@ -167,14 +172,14 @@ async def delete_employee(
     ip_address: str | None,
     db: AsyncSession,
 ) -> dict:
-    """Permanently remove an employee from the roster.
+    """Remove an employee from the active roster while KEEPING their record.
 
-    We hard-delete the Employee row (so it disappears from the list) and demote
-    the linked user out of admin (role=user, status=terminated, sessions revoked)
-    — we do NOT delete the users row, because audit_logs / support_tickets / etc.
-    FK-reference users.id and deleting it would break history. (Previously this
-    only set is_active=False, so the row stayed in the list — the "delete nahi ho
-    raha" complaint.)
+    Client 2026-06-20: a deleted employee's information must still be visible.
+    So we SOFT-delete — set Employee.is_active=False (the row stays so the admin
+    can still see who they were, their role and activity) and demote the linked
+    user out of admin (role=user, status=terminated, sessions revoked) so they
+    lose all access. The frontend marks is_active=False employees as "Deleted".
+    (We don't drop the users row either — audit_logs / tickets FK it.)
     """
     if admin.role != "super_admin":
         raise HTTPException(status_code=403, detail="Only super admins can delete employees")
@@ -192,7 +197,7 @@ async def delete_employee(
     user = user_q.scalar_one_or_none()
     user_email = user.email if user else None
 
-    await db.delete(employee)
+    employee.is_active = False  # soft delete — keep the record visible
     if user:
         user.role = "user"
         user.status = "terminated"

@@ -75,6 +75,40 @@ def render_welcome(
         + '</ul>'
     )
 
+    # Product & rewards highlights (client 2026-06-20: the welcome mail should
+    # introduce referral, insurance, bonus, fixed-return and PAMM/MAM).
+    products_html = (
+        '<p style="margin:24px 0 12px;color:#1a1a1a;font-size:14px;font-weight:700;">'
+        "Ways to earn more and protect your capital:"
+        '</p>'
+        '<ul style="margin:0 0 24px;padding:0 0 0 18px;color:#1a1a1a;">'
+        + _bullet(
+            "Referral Rewards",
+            "Share your referral link — earn rewards when the people you invite join and start trading.",
+        )
+        + _bullet(
+            "Trade Insurance",
+            "Optionally insure a position so a covered loss is partly refunded. Trade with a built-in safety net.",
+        )
+        + _bullet(
+            "Deposit Bonus",
+            "Qualifying deposits can earn a bonus credited straight to your wallet, so you can size up from day one.",
+        )
+        + _bullet(
+            "Fixed Return",
+            "Park capital in the Fixed Return product for steady, capital-protected returns over a chosen term.",
+        )
+        + _bullet(
+            "Introducing Broker (IB)",
+            "Become an Introducing Broker and earn per-lot commissions on the clients you bring to SwisDex.",
+        )
+        + _bullet(
+            "PAMM & MAM Investing",
+            "Invest alongside expert money managers — or run a pool yourself — with profits shared automatically.",
+        )
+        + '</ul>'
+    )
+
     credentials_html = ""
     if username or trading_id:
         credentials_html = (
@@ -140,7 +174,7 @@ def render_welcome(
         '</p>'
     )
 
-    body_html = experience_html + credentials_html + why_html + closing
+    body_html = experience_html + products_html + credentials_html + why_html + closing
 
     subject = "Welcome to SwisDex"
     html = render_layout(
@@ -155,8 +189,7 @@ def render_welcome(
         ),
     )
     text = (
-        "Welcome to the Future of Decentralized Trading\n"
-        "===============================================\n\n"
+        "Welcome to the Future of Decentralized Trading\n\n"
         f"Dear {name},\n\n"
         "Thank you for choosing SwisDex. We are excited to welcome you to a "
         "growing community of active crypto and derivatives traders.\n\n"
@@ -165,6 +198,13 @@ def render_welcome(
         "  • Earn Hub Rewards — daily streaks, Spin & Win, staking, tasks.\n"
         "  • Advanced Risk Management — smart execution, leverage controls, wallet-based security.\n"
         "  • Demo Trading Account — practice strategies risk-free.\n\n"
+        "Ways to earn more and protect your capital:\n"
+        "  • Referral Rewards — earn when the people you invite join and start trading.\n"
+        "  • Trade Insurance — insure a position so a covered loss is partly refunded.\n"
+        "  • Deposit Bonus — qualifying deposits earn a bonus credited to your wallet.\n"
+        "  • Fixed Return — steady, capital-protected returns over a chosen term.\n"
+        "  • Introducing Broker (IB) — earn per-lot commissions on the clients you bring in.\n"
+        "  • PAMM & MAM Investing — invest alongside expert money managers, or run a pool yourself.\n\n"
     )
     if username:
         text += f"Username: {username}\n"
@@ -172,8 +212,7 @@ def render_welcome(
         text += f"Trading ID: {trading_id}\n"
     text += (
         f"\nOpen your dashboard: {trader_app_url.rstrip('/')}/accounts\n\n"
-        "Why Trade with SwisDex\n"
-        "----------------------\n"
+        "Why Trade with SwisDex:\n"
         "  • Decentralized wallet-based trading\n"
         "  • Fast order execution\n"
         "  • Demo & live trading accounts\n"

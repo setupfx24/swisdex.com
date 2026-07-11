@@ -171,9 +171,19 @@ async def charge_due_positions(db: AsyncSession, now: Optional[datetime] = None)
             pos.last_swap_at = now
             continue
 
+        # Negative Balance Protection (client 2026-06-20): a swap/overnight fee
+        # must never push the balance below zero — charge only what the account
+        # actually holds. This is what was slowly driving some accounts negative.
+        _bal = Decimal(str(account.balance or 0))
+        if _bal <= 0:
+            pos.last_swap_at = now
+            continue
+        if fee > _bal:
+            fee = _bal
+
         # Apply fee — deduct from balance, mark on the position, and write
         # a Transaction row for audit.
-        new_balance = (Decimal(str(account.balance or 0))) - fee
+        new_balance = _bal - fee
         account.balance = new_balance
         account.equity = new_balance + Decimal(str(account.credit or 0))
         account.free_margin = account.equity - Decimal(str(account.margin_used or 0))

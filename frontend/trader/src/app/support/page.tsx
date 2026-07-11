@@ -90,6 +90,8 @@ export default function SupportPage() {
 
   const [newDescription, setNewDescription] = useState('');
 
+  const [newFile, setNewFile] = useState<File | null>(null);
+
   const [loading, setLoading] = useState(true);
 
   const [detailLoading, setDetailLoading] = useState(false);
@@ -242,6 +244,24 @@ export default function SupportPage() {
 
       setCreating(true);
 
+      // Optional attachment — sent inline as a base64 data URL in `attachments`
+      // (backend already accepts the list). Capped at 3MB (client 2026-06-25).
+      let attachments: { name: string; type: string; data: string }[] | undefined;
+      if (newFile) {
+        if (newFile.size > 3 * 1024 * 1024) {
+          toast.error('Attachment too large (max 3MB).');
+          setCreating(false);
+          return;
+        }
+        const data = await new Promise<string>((resolve, reject) => {
+          const r = new FileReader();
+          r.onload = () => resolve(String(r.result));
+          r.onerror = () => reject(new Error('read failed'));
+          r.readAsDataURL(newFile);
+        });
+        attachments = [{ name: newFile.name, type: newFile.type, data }];
+      }
+
       const res = await api.post<{ id: string }>('/support/tickets', {
 
         subject: newSubject,
@@ -249,6 +269,8 @@ export default function SupportPage() {
         category: newCategory,
 
         message: newDescription,
+
+        ...(attachments ? { attachments } : {}),
 
       });
 
@@ -261,6 +283,8 @@ export default function SupportPage() {
       setNewDescription('');
 
       setNewCategory('Trading');
+
+      setNewFile(null);
 
       await fetchTickets();
 
@@ -397,6 +421,17 @@ export default function SupportPage() {
 
                 />
 
+              </div>
+
+              <div>
+                <label className="text-xs text-text-secondary block mb-1.5 font-medium">Attachment <span className="text-text-tertiary">(optional, max 3MB)</span></label>
+                <input
+                  type="file"
+                  accept="image/*,application/pdf"
+                  onChange={(e) => setNewFile(e.target.files?.[0] ?? null)}
+                  className="w-full text-xs text-text-secondary file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-bg-hover file:text-text-primary file:cursor-pointer"
+                />
+                {newFile && <p className="text-[10px] text-text-tertiary mt-1 truncate">{newFile.name}</p>}
               </div>
 
               <div className="flex justify-end gap-2">

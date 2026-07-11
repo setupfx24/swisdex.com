@@ -8,6 +8,7 @@ import { useTradingStore, type TradingAccount, type TickData } from '@/stores/tr
 import api from '@/lib/api/client';
 import { sounds, unlockAudio } from '@/lib/sounds';
 import { getDigits } from '@/lib/utils';
+import { fmtAccountMoney, isCentAccount } from '@/lib/wallet/centDisplay';
 import { getMarketStatus } from '@/lib/marketHours';
 import { wsManager, type ConnectionStatus } from '@/lib/ws/wsManager';
 import { extractTicksFromPayload } from '@/lib/ws/normalizePricePayload';
@@ -475,8 +476,8 @@ export default function AccountTradePanel({ account, onClose }: AccountTradePane
             <div className="rounded-xl p-2.5 space-y-1.5 bg-bg-secondary" style={{ border: `1px solid ${!hasEnoughMargin ? 'rgba(239,83,80,0.3)' : 'var(--border-primary)'}` }}>
               {[
                 { label: 'Exec. Price', value: execPrice > 0 ? execPrice.toFixed(digits) : '—', color: 'var(--text-primary)' },
-                { label: 'Margin Required', value: `$${marginRequired.toFixed(2)}`, color: !hasEnoughMargin ? '#ef5350' : 'var(--text-primary)' },
-                { label: 'Free Margin', value: `$${freeMargin.toFixed(2)}`, color: !hasEnoughMargin ? '#ef5350' : '#55a630' },
+                { label: 'Margin Required', value: fmtAccountMoney(marginRequired, isCentAccount(account)), color: !hasEnoughMargin ? '#ef5350' : 'var(--text-primary)' },
+                { label: 'Free Margin', value: fmtAccountMoney(freeMargin, isCentAccount(account)), color: !hasEnoughMargin ? '#ef5350' : '#55a630' },
                 { label: 'Feed', value: isConnected ? '● Connected' : '○ Disconnected', color: isConnected ? '#55a630' : '#f57c00' },
               ].map((row) => (
                 <div key={row.label} className="flex items-center justify-between">
@@ -534,9 +535,14 @@ export default function AccountTradePanel({ account, onClose }: AccountTradePane
                 const cp = liveTick ? (pos.side === 'buy' ? liveTick.bid : liveTick.ask) : 0;
                 const inst = instruments.find((i) => i.symbol === pos.symbol);
                 const cs = inst?.contract_size || 100000;
-                // Engine lots, not display lots — else a cent position's
-                // live P&L shows 100× too large.
-                const pnlLots = pos.effective_lots ?? pos.lots;
+                // Engine lots, not display lots — else a cent position's live
+                // P&L shows 100× too large (client 2026-06-23: "¢4 then suddenly
+                // ¢45000 loss" = a tick update arrived without effective_lots and
+                // fell back to display lots). When effective_lots is missing,
+                // derive it from display lots × the account multiplier instead of
+                // trusting the raw display lots.
+                const _lotMult = Number((account as { account_group?: { lot_size_multiplier?: number } }).account_group?.lot_size_multiplier) || 1;
+                const pnlLots = pos.effective_lots ?? (pos.lots * _lotMult);
                 const livePnl = cp > 0
                   ? pos.side === 'buy'
                     ? (cp - pos.open_price) * pnlLots * cs
@@ -571,7 +577,7 @@ export default function AccountTradePanel({ account, onClose }: AccountTradePane
                     </div>
                     <div className="text-right shrink-0">
                       <div className="text-[11px] font-mono font-bold tabular-nums" style={{ color: pnlColor }}>
-                        {livePnl >= 0 ? '+' : ''}{livePnl.toFixed(2)}
+                        {fmtAccountMoney(livePnl, isCentAccount(account), { signDisplay: 'always' })}
                       </div>
                     </div>
                   </div>
@@ -583,10 +589,10 @@ export default function AccountTradePanel({ account, onClose }: AccountTradePane
           {/* Account summary footer */}
           <div className="px-3 py-2 space-y-1 border-t border-border-primary bg-bg-secondary">
             {[
-              { label: 'Balance', value: `$${account.balance.toFixed(2)}` },
-              { label: 'Equity', value: `$${account.equity.toFixed(2)}` },
-              { label: 'Margin Used', value: `$${account.margin_used.toFixed(2)}` },
-              { label: 'Free Margin', value: `$${account.free_margin.toFixed(2)}`, color: '#55a630' },
+              { label: 'Balance', value: fmtAccountMoney(account.balance, isCentAccount(account)) },
+              { label: 'Equity', value: fmtAccountMoney(account.equity, isCentAccount(account)) },
+              { label: 'Margin Used', value: fmtAccountMoney(account.margin_used, isCentAccount(account)) },
+              { label: 'Free Margin', value: fmtAccountMoney(account.free_margin, isCentAccount(account)), color: '#55a630' },
             ].map((r) => (
               <div key={r.label} className="flex items-center justify-between">
                 <span className="text-[9px] text-text-tertiary">{r.label}</span>

@@ -64,6 +64,9 @@ class UserOut(BaseModel):
     trading_blocked_until: Optional[datetime] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    email_verified: Optional[bool] = None
+    two_factor_enabled: Optional[bool] = None
+    bank_deposit_enabled: Optional[bool] = None
 
     class Config:
         from_attributes = True
@@ -87,6 +90,10 @@ class AccountTypeIn(BaseModel):
     # Per-account-type Trade Insurance gate (Mig 0070). True = type may
     # use insurance; False = insurance hidden + blocked for this type.
     insurance_enabled: bool = True
+    # Cent account: balances shown in ¢ (×100) and lots scaled by
+    # lot_size_multiplier (client 2026-06-25: admin can create cent types).
+    is_cent_account: bool = False
+    lot_size_multiplier: float = 1.0
 
 
 class AccountTypeOut(BaseModel):
@@ -102,6 +109,8 @@ class AccountTypeOut(BaseModel):
     is_demo: bool
     is_active: bool
     insurance_enabled: bool = True
+    is_cent_account: bool = False
+    lot_size_multiplier: float = 1.0
     created_at: Optional[datetime] = None
 
     class Config:
@@ -475,6 +484,9 @@ class IBProfileOut(BaseModel):
     user_email: Optional[str] = None
     user_name: Optional[str] = None
     referral_count: int = 0
+    # Role by lineage: 'super_ib' (SDA05 root) | 'ib' | 'sub_ib'. Classified the
+    # same way as the IB tree, so the Active IBs table can badge/filter by role.
+    ib_type: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -689,6 +701,7 @@ class TicketOut(BaseModel):
     status: str
     priority: str
     assigned_to: Optional[str] = None
+    assigned_name: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     user_email: Optional[str] = None

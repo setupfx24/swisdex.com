@@ -46,6 +46,9 @@ export default function FixedReturnConfigPage() {
   // cycle (25th → 30th). Setting both to 1/31 disables the gate.
   const [payoutDayStart, setPayoutDayStart] = useState<number>(25);
   const [payoutDayEnd, setPayoutDayEnd] = useState<number>(30);
+  // AI-Staking referral commission % (referrer chooses which one applies).
+  const [refPrincipalPct, setRefPrincipalPct] = useState<number>(0);
+  const [refInterestPct, setRefInterestPct] = useState<number>(0);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
@@ -59,6 +62,8 @@ export default function FixedReturnConfigPage() {
       const lock = list.find((s) => s.key === 'fixed_return_lock_months')?.value;
       const dayStart = list.find((s) => s.key === 'fixed_return_payout_day_start')?.value;
       const dayEnd = list.find((s) => s.key === 'fixed_return_payout_day_end')?.value;
+      const refPrin = list.find((s) => s.key === 'fr_referral_principal_pct')?.value;
+      const refInt = list.find((s) => s.key === 'fr_referral_interest_pct')?.value;
       if (rates && Array.isArray(rates.tiers)) {
         setCfg(normalize(rates));
       }
@@ -78,8 +83,10 @@ export default function FixedReturnConfigPage() {
         const n = Number(dayEnd);
         if (Number.isFinite(n) && n >= 1 && n <= 31) setPayoutDayEnd(Math.floor(n));
       }
+      if (refPrin != null) { const n = Number(refPrin); if (Number.isFinite(n) && n >= 0) setRefPrincipalPct(n); }
+      if (refInt != null) { const n = Number(refInt); if (Number.isFinite(n) && n >= 0) setRefInterestPct(n); }
     } catch (e: any) {
-      toast.error(e?.message || 'Failed to load Fixed Return config');
+      toast.error(e?.message || 'Failed to load AI Powered Staking config');
     } finally {
       setLoading(false);
     }
@@ -204,9 +211,11 @@ export default function FixedReturnConfigPage() {
           fixed_return_lock_months: lockMonths,
           fixed_return_payout_day_start: payoutDayStart,
           fixed_return_payout_day_end: payoutDayEnd,
+          fr_referral_principal_pct: refPrincipalPct,
+          fr_referral_interest_pct: refInterestPct,
         },
       });
-      toast.success('Fixed Return config saved');
+      toast.success('AI Powered Staking config saved');
     } catch (e: any) {
       toast.error(e?.message || 'Save failed');
     } finally {
@@ -226,7 +235,7 @@ export default function FixedReturnConfigPage() {
     <div className="p-6 space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-lg font-semibold text-text-primary">Fixed Return — Rate Matrix</h1>
+          <h1 className="text-lg font-semibold text-text-primary">AI Powered Staking — Rate Matrix</h1>
           <p className="text-xxs text-text-tertiary mt-0.5 max-w-3xl">
             Every lock runs for the full <strong>Lock period</strong> below. <strong>Tenure</strong> is the
             payout cadence — the user receives <em>principal × rate%</em> every cycle (Month / Quarter / etc.)
@@ -317,6 +326,39 @@ export default function FixedReturnConfigPage() {
             (default 25 → 30). Outside the window, due interest sits as
             a pending payout and lands the moment the window opens. Set
             both to 1 / 31 to disable the gate.
+          </p>
+        </div>
+      </div>
+
+      <div className="bg-bg-secondary border border-border-primary rounded-md p-4 flex flex-wrap gap-6">
+        <div className="flex flex-col gap-1">
+          <label className="text-xs font-medium text-text-secondary">Referral — % of principal</label>
+          <div className="flex items-center gap-2">
+            <input
+              type="number" min={0} max={100} step="0.1" value={refPrincipalPct}
+              onChange={(e) => setRefPrincipalPct(Math.max(0, parseFloat(e.target.value) || 0))}
+              className="w-24 px-2 py-1 text-xs bg-bg-input border border-border-primary rounded font-mono tabular-nums text-text-primary"
+            />
+            <span className="text-xxs text-text-tertiary">%</span>
+          </div>
+          <p className="text-[10px] text-text-tertiary max-w-xs">
+            Paid ONCE to the referrer when a referred user locks — for referrers who chose
+            &quot;On principal&quot; mode. 0 = off.
+          </p>
+        </div>
+        <div className="flex flex-col gap-1">
+          <label className="text-xs font-medium text-text-secondary">Referral — % of interest</label>
+          <div className="flex items-center gap-2">
+            <input
+              type="number" min={0} max={100} step="0.1" value={refInterestPct}
+              onChange={(e) => setRefInterestPct(Math.max(0, parseFloat(e.target.value) || 0))}
+              className="w-24 px-2 py-1 text-xs bg-bg-input border border-border-primary rounded font-mono tabular-nums text-text-primary"
+            />
+            <span className="text-xxs text-text-tertiary">%</span>
+          </div>
+          <p className="text-[10px] text-text-tertiary max-w-xs">
+            Paid on EACH interest payout the referred user receives — for referrers who chose
+            &quot;On interest&quot; mode. 0 = off.
           </p>
         </div>
       </div>

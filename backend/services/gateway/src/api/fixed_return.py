@@ -20,6 +20,10 @@ router = APIRouter()
 class CreateLockRequest(BaseModel):
     principal: Decimal = Field(gt=0)
     tenure_label: str
+    # Set true once the user has accepted the "your bonus will be forfeited"
+    # confirm popup (client 2026-06-30). Without it, a lock that would leave the
+    # wallet below the bonus amount is rejected with 409 so the UI can prompt.
+    acknowledge_bonus_forfeit: bool = False
 
 
 @router.get("/config")
@@ -62,6 +66,7 @@ async def create_lock(
 ) -> dict[str, Any]:
     return await fixed_return_service.create_lock(
         current_user["user_id"], req.principal, req.tenure_label, db,
+        acknowledge_bonus_forfeit=req.acknowledge_bonus_forfeit,
     )
 
 

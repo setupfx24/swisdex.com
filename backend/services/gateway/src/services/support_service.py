@@ -62,6 +62,7 @@ async def list_tickets(
 
 async def create_ticket(
     user_id: UUID, subject: str, message: str, priority: str, db: AsyncSession,
+    attachments: list | None = None,
 ) -> dict:
     ticket = SupportTicket(
         user_id=user_id,
@@ -76,12 +77,78 @@ async def create_ticket(
         ticket_id=ticket.id,
         sender_id=user_id,
         message=message,
+        attachments=attachments or None,
         is_admin=False,
     )
     db.add(first_message)
     await db.commit()
     await db.refresh(ticket)
     await db.refresh(first_message)
+
+    # Email the support inbox so a new ticket isn't missed (client 2026-06-24:
+    # "mail bhi jana chahiye support wale me"). The in-app admin bell already
+    # counts open tickets; this adds the email channel. Best-effort — a mail
+    # failure must never fail the ticket creation.
+    try:
+        from html import escape
+        from packages.common.src.models import User as _User
+        from packages.common.src.smtp_mail import send_email
+        from packages.common.src.config import get_settings
+        from packages.common.src.settings_store import get_system_setting
+
+        submitter = (await db.execute(
+            select(_User).where(_User.id == user_id)
+        )).scalar_one_or_none()
+        who = (submitter.email if submitter and submitter.email else str(user_id))
+        support_to = (await get_system_setting("support_email", None)) or get_settings().ADMIN_EMAIL
+        if support_to:
+            await send_email(
+                support_to,
+                subject=f"New support ticket: {subject}",
+                html=(
+                    "<p>A new support ticket was submitted on SwisDex.</p>"
+                    f"<p><b>From:</b> {escape(who)}<br>"
+                    f"<b>Priority:</b> {escape(priority or 'normal')}<br>"
+                    f"<b>Subject:</b> {escape(subject or '')}</p>"
+                    f"<p><b>Message:</b><br>{escape(message or '').replace(chr(10), '<br>')}</p>"
+                    + (f"<p><b>Attachments:</b> {len(attachments)} file(s) attached to this email (also in the admin panel).</p>"
+                       if attachments else "")
+                    + "<p>Open the Support section in the admin panel to reply.</p>"
+                ),
+                text=(
+                    f"New support ticket from {who}\n"
+                    f"Priority: {priority or 'normal'}\nSubject: {subject}\n\n{message}\n"
+                    + (f"\nAttachments: {len(attachments)} file(s) — attached, or view in the admin panel.\n"
+                       if attachments else "")
+                ),
+                category="support",
+                attachments=attachments,
+            )
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("support ticket email failed")
+
+    # In-app alert for EVERY admin so a new ticket surfaces on their bell — not
+    # only the email + open-count (client 2026-06-26: "report admin ke paas
+    # nahi pahunch rahi"). Best-effort — never fail the ticket over a notify.
+    try:
+        from packages.common.src.notify import create_notification
+        from packages.common.src.models import User as _Adm
+        admin_ids = (await db.execute(
+            select(_Adm.id).where(_Adm.role.in_(["admin", "super_admin"]))
+        )).scalars().all()
+        for aid in admin_ids:
+            await create_notification(
+                db, aid,
+                title="New support ticket",
+                message=(subject or "A user submitted a support ticket."),
+                notif_type="info",
+                action_url="/support",
+            )
+        await db.commit()
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("support ticket admin notify failed")
 
     return {
         "id": str(ticket.id),

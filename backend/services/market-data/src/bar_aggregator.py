@@ -42,6 +42,10 @@ class BarAggregator:
     def __init__(self):
         self._bars: dict[str, dict[str, BarData]] = defaultdict(dict)
         self._bar_timestamps: dict[str, dict[str, int]] = defaultdict(dict)
+        # Optional durable OHLC store (set by MarketDataService). When present,
+        # every CLOSED bar is persisted to the marketdata DB (ohlcv_<tf>) so chart
+        # history is deep + restart-proof. None → Redis-only (backward compatible).
+        self.ohlc_store = None
 
     def update(self, symbol: str, bid: float, ask: float, timestamp: str):
         mid = (bid + ask) / 2
@@ -81,7 +85,7 @@ class BarAggregator:
             "high": bar.high,
             "low": bar.low,
             "close": bar.close,
-            "volume": bar.volume,
+            "volume": bar.tick_count,
             "tick_count": bar.tick_count,
         }
 
@@ -91,6 +95,16 @@ class BarAggregator:
         list_key = f"bars:{symbol}:{timeframe}"
         await redis_client.lpush(list_key, json.dumps(bar_data))
         await redis_client.ltrim(list_key, 0, 999)
+
+        # Persist the CLOSED bar to the durable OHLC store (marketdata DB) so chart
+        # history survives restarts and isn't capped at 1000 Redis bars. Only
+        # closed bars reach _store_bar; the live/forming candle stays in Redis.
+        if self.ohlc_store is not None:
+            await self.ohlc_store.upsert(
+                symbol, timeframe, bar_start,
+                bar.open, bar.high, bar.low, bar.close,
+                volume=bar.tick_count, tick_count=bar.tick_count,
+            )
 
         # ATR(14) — used by trade insurance pricing. Computed only on 1m bars
         # because that's the timeframe insurance quotes care about.
@@ -157,17 +171,16 @@ class BarAggregator:
                                 self._store_bar(symbol, tf_name, old_bar, bar_start)
                             )
                         last_close = bar.close
-                        # Fill every missed window with a doji so the chart
-                        # never sees a gap. Capped to avoid CPU spikes on
-                        # very long outages — the first 10 windows we fill
-                        # explicitly, anything beyond that we let the next
-                        # real tick handle (an honest gap is better than
-                        # 1000 doji bars). 10 covers the ~50min worst case
-                        # at 5m TF, ~10h at 1h TF.
+                        # Fill only TINY micro-pauses (≤2 missed windows) with a
+                        # doji so the time axis stays smooth, but leave genuine
+                        # gaps REAL — painting many flat synthetic bars during a
+                        # real outage misleads users and any indicator that reads
+                        # them (client 2026-06-30, was 10). Anything beyond 2
+                        # windows shows as an honest gap until the next tick.
                         cur_start = bar_start + tf_seconds
                         filled = 0
                         ts_iso = datetime.fromtimestamp(cur_start, tz=timezone.utc).isoformat()
-                        while cur_start + tf_seconds <= now_epoch and filled < 10:
+                        while cur_start + tf_seconds <= now_epoch and filled < 2:
                             doji = BarData(last_close, ts_iso)
                             doji.tick_count = 0  # mark as filler
                             await self._store_bar(symbol, tf_name, doji, cur_start)
@@ -189,7 +202,7 @@ class BarAggregator:
                         "high": bar.high,
                         "low": bar.low,
                         "close": bar.close,
-                        "volume": bar.volume,
+                        "volume": bar.tick_count,
                         "tick_count": bar.tick_count,
                     }
                     bar_key = f"bar:current:{symbol}:{tf_name}"

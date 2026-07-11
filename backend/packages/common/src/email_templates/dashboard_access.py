@@ -78,8 +78,7 @@ def render_dashboard_access(
     )
 
     text = (
-        f"Welcome aboard, {name}\n"
-        "======================\n\n"
+        f"Welcome aboard, {name}\n\n"
         "Your profile is complete and your SwisDex dashboard is ready.\n"
         "Open it here:\n\n"
         f"  {dashboard_url}\n\n"

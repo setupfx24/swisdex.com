@@ -180,11 +180,13 @@ async def assignable_employees(
     admin: User = Depends(require_permission("tasks.assign")),
     db: AsyncSession = Depends(get_db),
 ):
-    """Employees a manager can assign tasks to (active employees)."""
+    """Employees a manager can assign tasks to (active employees, excluding
+    the manager themselves — client 2026-06-20: an employee could assign work
+    to their own self)."""
     rows = (await db.execute(
         select(Employee.user_id, Employee.role, User.first_name, User.last_name, User.email)
         .join(User, User.id == Employee.user_id)
-        .where(Employee.is_active == True)
+        .where(Employee.is_active == True, Employee.user_id != admin.id)
     )).all()
     return {"items": [
         {
