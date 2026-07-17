@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
-import { Mail, MapPin, Send, MessageCircle, X } from 'lucide-react'
+import { Mail, MapPin, Send, MessageCircle, X, Check, Loader2, AlertTriangle } from 'lucide-react'
 import Button from '../components/Button'
 import Card from '../components/Card'
 import ScrollReveal, { ScrollRevealGroup, ScrollRevealItem } from '../components/animations/ScrollReveal'
@@ -21,6 +21,11 @@ const Contact = () => {
     subject: '',
     message: ''
   })
+
+  // Submit lifecycle — drives the button spinner and the success/error modal.
+  //   status: 'idle' | 'submitting' | 'success' | 'error'
+  const [submitStatus, setSubmitStatus] = useState('idle')
+  const [submitError, setSubmitError]   = useState('')
 
   const [isChatOpen, setIsChatOpen] = useState(false)
   const [chatInput, setChatInput] = useState('')
@@ -56,23 +61,53 @@ const Contact = () => {
     }, 800)
   }
 
-  const handleSubmit = (e) => {
+  // ─────────────────────────────────────────────────────────────────
+  // Contact-form delivery — POST to FormSubmit (hosted form-to-email
+  // relay, zero backend + zero API key required). The service forwards
+  // every submission to support@swisdex.com.
+  //
+  // One-time activation: the FIRST submission after this deploys will
+  // trigger a confirmation email to support@swisdex.com — the recipient
+  // MUST click the "Activate Form" link in that email once. After
+  // activation every subsequent submission arrives silently in the inbox.
+  //
+  // If FormSubmit is ever down / blocked, we still surface the error
+  // inside the modal so the visitor knows to email us directly.
+  // ─────────────────────────────────────────────────────────────────
+  const CONTACT_ENDPOINT = 'https://formsubmit.co/ajax/support@swisdex.com'
+
+  const handleSubmit = async (e) => {
     e.preventDefault()
-    // Compose an email to support@swisdex.com using the visitor's default
-    // mail client. This has zero backend dependency and works today —
-    // caveat: the visitor must have a mail client configured. For a
-    // proper server-side send, wire the same fields into a Web3Forms /
-    // Formspree endpoint or a small FastAPI /contact route (see
-    // README.contact.md for the how-to).
-    const to = 'support@swisdex.com'
-    const subject = `[SwisDex Contact] ${formData.subject || 'General enquiry'} — ${formData.name || 'Unknown'}`
-    const body =
-      `Name: ${formData.name}\n` +
-      `Email: ${formData.email}\n` +
-      `Subject: ${formData.subject}\n\n` +
-      `${formData.message}\n`
-    window.location.href = `mailto:${to}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`
-    setFormData({ name: '', email: '', subject: '', message: '' })
+    setSubmitStatus('submitting')
+    setSubmitError('')
+    try {
+      const res = await fetch(CONTACT_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+        body: JSON.stringify({
+          name:    formData.name,
+          email:   formData.email,
+          subject: formData.subject,
+          message: formData.message,
+          // FormSubmit control fields — prefix with `_`.
+          _subject: `[SwisDex Contact] ${formData.subject || 'General enquiry'} — ${formData.name || 'Unknown'}`,
+          _template: 'table',
+          _captcha:  'false',
+        }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok || (data && data.success === 'false')) {
+        throw new Error(data?.message || `Server responded with ${res.status}`)
+      }
+      setSubmitStatus('success')
+      setFormData({ name: '', email: '', subject: '', message: '' })
+    } catch (err) {
+      setSubmitError(err?.message || 'We could not send your message. Please try again in a moment or email support@swisdex.com directly.')
+      setSubmitStatus('error')
+    }
   }
 
   const handleChange = (e) => {
@@ -100,8 +135,112 @@ const Contact = () => {
     },
   ]
 
+  // Success / error modal — shown when submitStatus flips out of idle/submitting.
+  const StatusModal = () => {
+    const isSuccess = submitStatus === 'success'
+    const isError   = submitStatus === 'error'
+    if (!isSuccess && !isError) return null
+
+    return (
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="contact-status-title"
+        className="fixed inset-0 z-[300] flex items-center justify-center px-4"
+        style={{ background: 'rgba(0,0,0,0.72)', backdropFilter: 'blur(6px)' }}
+        onClick={() => setSubmitStatus('idle')}
+      >
+        <div
+          onClick={(e) => e.stopPropagation()}
+          className="relative w-full max-w-[440px] rounded-2xl pt-16 pb-8 px-8 text-center shadow-2xl animate-[modalIn_.28s_cubic-bezier(.22,1,.36,1)]"
+          style={{
+            background: 'linear-gradient(180deg, #12161c 0%, #0a0d12 100%)',
+            border: '1px solid rgba(255,255,255,0.08)',
+            boxShadow: '0 24px 64px rgba(0,0,0,0.65), inset 0 1px 0 rgba(255,255,255,0.05)',
+          }}
+        >
+          {/* Close (subtle, top-right) */}
+          <button
+            type="button"
+            aria-label="Close"
+            onClick={() => setSubmitStatus('idle')}
+            className="absolute top-4 right-4 w-8 h-8 rounded-full flex items-center justify-center text-white/50 hover:text-white hover:bg-white/10 transition-colors"
+          >
+            <X className="w-4 h-4" />
+          </button>
+
+          {/* Halo icon — sits half above the card top edge */}
+          <div
+            className="absolute left-1/2 -top-10 -translate-x-1/2 w-20 h-20 rounded-full flex items-center justify-center"
+            style={{
+              background: isSuccess
+                ? 'linear-gradient(180deg, #55a630 0%, #3d7a1f 100%)'
+                : 'linear-gradient(180deg, #d00000 0%, #7a0000 100%)',
+              boxShadow: isSuccess
+                ? '0 12px 32px rgba(85,166,48,0.45), inset 0 1px 0 rgba(255,255,255,0.25)'
+                : '0 12px 32px rgba(208,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.25)',
+              border: '4px solid #0a0d12',
+            }}
+          >
+            {isSuccess
+              ? <Check className="w-10 h-10 text-white" strokeWidth={3} />
+              : <AlertTriangle className="w-9 h-9 text-white" strokeWidth={2.5} />}
+          </div>
+
+          <h3
+            id="contact-status-title"
+            className="text-3xl md:text-4xl font-bold mb-3 tracking-tight"
+            style={{ color: '#ffffff' }}
+          >
+            {isSuccess ? 'Message Sent' : 'Something went wrong'}
+          </h3>
+
+          <p
+            className="text-sm md:text-base leading-relaxed mb-8 max-w-[340px] mx-auto"
+            style={{ color: 'rgba(255,255,255,0.68)' }}
+          >
+            {isSuccess
+              ? 'Thanks for reaching out. Our team has received your message and will get back to you within 24 hours at the email you provided.'
+              : (submitError || 'We could not deliver your message. Please try again in a moment or email support@swisdex.com directly.')}
+          </p>
+
+          <button
+            type="button"
+            onClick={() => setSubmitStatus('idle')}
+            className="w-full py-3.5 rounded-xl text-white font-semibold text-base transition-transform active:scale-[0.98]"
+            style={{
+              background: isSuccess
+                ? 'linear-gradient(180deg, #55a630 0%, #3d7a1f 100%)'
+                : 'linear-gradient(180deg, #4a4a4a 0%, #2a2a2a 100%)',
+              boxShadow: isSuccess
+                ? '0 8px 24px rgba(85,166,48,0.35), inset 0 1px 0 rgba(255,255,255,0.18)'
+                : '0 8px 24px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.08)',
+            }}
+          >
+            {isSuccess ? 'OK' : 'Close'}
+          </button>
+
+          {isSuccess && (
+            <p className="mt-4 text-xs" style={{ color: 'rgba(255,255,255,0.4)' }}>
+              A copy is on its way to support@swisdex.com
+            </p>
+          )}
+        </div>
+
+        {/* Enter animation keyframes */}
+        <style>{`
+          @keyframes modalIn {
+            from { opacity: 0; transform: translateY(12px) scale(0.96); }
+            to   { opacity: 1; transform: translateY(0)     scale(1); }
+          }
+        `}</style>
+      </div>
+    )
+  }
+
   return (
     <div className="min-h-screen pt-20">
+      <StatusModal />
       <section className="section-padding hero-banner">
         <div className="container-custom text-center">
           <ScrollReveal variant="fadeUp">
@@ -224,9 +363,24 @@ const Contact = () => {
                       placeholder="How can we help you?"
                     ></textarea>
                   </div>
-                  <Button type="submit" variant="primary" noPopup className="w-full flex items-center justify-center gap-2">
-                    <Send className="w-5 h-5" />
-                    Send Message
+                  <Button
+                    type="submit"
+                    variant="primary"
+                    noPopup
+                    disabled={submitStatus === 'submitting'}
+                    className="w-full flex items-center justify-center gap-2 disabled:opacity-70 disabled:cursor-not-allowed"
+                  >
+                    {submitStatus === 'submitting' ? (
+                      <>
+                        <Loader2 className="w-5 h-5 animate-spin" />
+                        Sending…
+                      </>
+                    ) : (
+                      <>
+                        <Send className="w-5 h-5" />
+                        Send Message
+                      </>
+                    )}
                   </Button>
                 </form>
               </div>

@@ -128,6 +128,9 @@ export default function LandingFooter() {
               onClick={openCookieSettings}
               className="inline-flex items-center gap-1.5 hover:text-[#55a630] transition-colors"
               aria-label="Open cookie settings"
+              // Silence the `fdprocessedid` mismatch from form-filler
+              // extensions — matches the same pin on Footer.jsx.
+              suppressHydrationWarning
             >
               <Cookie className="w-3.5 h-3.5" /> Cookie Settings
             </button>
