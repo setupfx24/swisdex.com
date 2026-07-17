@@ -58,7 +58,20 @@ const Contact = () => {
 
   const handleSubmit = (e) => {
     e.preventDefault()
-    alert('Thank you for your message! We will get back to you soon.')
+    // Compose an email to support@swisdex.com using the visitor's default
+    // mail client. This has zero backend dependency and works today —
+    // caveat: the visitor must have a mail client configured. For a
+    // proper server-side send, wire the same fields into a Web3Forms /
+    // Formspree endpoint or a small FastAPI /contact route (see
+    // README.contact.md for the how-to).
+    const to = 'support@swisdex.com'
+    const subject = `[SwisDex Contact] ${formData.subject || 'General enquiry'} — ${formData.name || 'Unknown'}`
+    const body =
+      `Name: ${formData.name}\n` +
+      `Email: ${formData.email}\n` +
+      `Subject: ${formData.subject}\n\n` +
+      `${formData.message}\n`
+    window.location.href = `mailto:${to}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`
     setFormData({ name: '', email: '', subject: '', message: '' })
   }
 
