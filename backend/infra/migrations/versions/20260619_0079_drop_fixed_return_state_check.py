@@ -1,6 +1,6 @@
 """Drop the fixed_return_locks.state CHECK constraint.
 
-Bug (client 2026-06-19): "Request early withdrawal" on a Fixed Return lock
+Bug (client 2026-06-19): "Request early withdrawal" on a AI-POWERED STAKING PROGRAM lock
 failed with a generic "Request failed". Root cause: the early-withdrawal path
 parks the lock in state='early_pending' (awaiting admin approval), but
 fixed_return_locks_state_check (migration 0040) only allowed

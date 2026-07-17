@@ -60,6 +60,11 @@ build/
 *.local
 *.tsbuildinfo
 
+# Native-dev module-name junctions (Windows) — aliases of the hyphenated dirs
+backend/services/market_data/
+backend/services/b_book_engine/
+backend/services/risk_engine/
+
 # Claude Code agent state (never commit)
 .claude/
 

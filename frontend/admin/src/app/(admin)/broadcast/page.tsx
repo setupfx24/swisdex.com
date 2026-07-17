@@ -378,7 +378,7 @@ export default function BroadcastPage() {
             <option value="funded_only">Funded only (balance &gt; 0)</option>
             <option value="ib">IB / Affiliates</option>
             <option value="pamm_mam">PAMM / MAM managers</option>
-            <option value="fixed_return">Fixed Return holders</option>
+            <option value="fixed_return">AI-POWERED STAKING PROGRAM holders</option>
           </select>
         </div>
 

@@ -7,9 +7,9 @@
  *    sortable by biggest profit / biggest loss / latest.
  * Auto-refreshes every 10s so the desk sees live risk without reloading.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import toast from 'react-hot-toast';
-import { Gauge, Loader2, RefreshCw, TrendingDown, TrendingUp, Clock } from 'lucide-react';
+import { Gauge, Loader2, RefreshCw, TrendingDown, TrendingUp, Clock, Search, X } from 'lucide-react';
 import { adminApi } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
@@ -36,6 +36,10 @@ export default function RiskPage() {
   const [trades, setTrades] = useState<TradeRow[]>([]);
   const [tradesTotal, setTradesTotal] = useState(0);
   const [symbolFilter, setSymbolFilter] = useState('');
+  const [userFilter, setUserFilter] = useState('');       // selected user email ('' = all)
+  const [userQuery, setUserQuery] = useState('');         // search text in the box
+  const [userOpen, setUserOpen] = useState(false);        // dropdown open
+  const userBoxRef = useRef<HTMLDivElement>(null);
   const [sort, setSort] = useState<'latest' | 'profit' | 'loss'>('latest');
   const [loading, setLoading] = useState(true);
   const [refreshedAt, setRefreshedAt] = useState<Date | null>(null);
@@ -69,6 +73,25 @@ export default function RiskPage() {
   }, [load]);
 
   const symbols = exposure.map((e) => e.symbol);
+  // Unique users across the open trades (for the running-trades user filter).
+  const users = Array.from(
+    new Map(trades.map((t) => [t.user_email, { email: t.user_email, name: t.user_name }])).values(),
+  ).sort((a, b) => a.name.localeCompare(b.name));
+  const q = userQuery.trim().toLowerCase();
+  const userMatches = q
+    ? users.filter((u) => u.name.toLowerCase().includes(q) || u.email.toLowerCase().includes(q))
+    : users;
+  const selectedUser = users.find((u) => u.email === userFilter) || null;
+  const visibleTrades = userFilter ? trades.filter((t) => t.user_email === userFilter) : trades;
+
+  // Close the user dropdown on outside click.
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      if (userBoxRef.current && !userBoxRef.current.contains(e.target as Node)) setUserOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, []);
 
   return (
     <div className="p-4 sm:p-6 space-y-4">
@@ -105,7 +128,9 @@ export default function RiskPage() {
         {[
           { label: 'Instruments in play', value: String(totals.instruments) },
           { label: 'Running trades', value: String(totals.trades) },
-          { label: 'Total running P&L', value: fmtMoney(totals.pnl), cls: pnlClass(totals.pnl) },
+          // Broker P&L = −(users' P&L). When users are in profit, the broker
+          // (B-book) is in loss, and vice versa.
+          { label: 'Broker running P&L', value: fmtMoney(-totals.pnl), cls: pnlClass(-totals.pnl) },
         ].map((c) => (
           <div key={c.label} className="rounded-lg border border-border-primary bg-bg-secondary px-3 py-2.5">
             <div className="text-xxs text-text-tertiary">{c.label}</div>
@@ -122,7 +147,7 @@ export default function RiskPage() {
           <div className="rounded-lg border border-border-primary bg-bg-secondary overflow-hidden">
             <div className="px-4 py-2.5 border-b border-border-primary">
               <h3 className="text-xs font-semibold text-text-primary">Net exposure by instrument</h3>
-              <p className="text-xxs text-text-tertiary mt-0.5">Net lots = buy − sell across all open trades. P&L is the live running total.</p>
+              <p className="text-xxs text-text-tertiary mt-0.5">Net lots = buy − sell across all open trades. <strong className="text-text-secondary">Broker P&L</strong> is the broker&apos;s side (green = broker profit / users losing, red = broker loss / users winning).</p>
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-left">
@@ -133,7 +158,7 @@ export default function RiskPage() {
                     <th className="px-3 py-2 text-right">Sell lots</th>
                     <th className="px-3 py-2 text-right">Net lots</th>
                     <th className="px-3 py-2 text-right">Trades</th>
-                    <th className="px-3 py-2 text-right">Running P&L</th>
+                    <th className="px-3 py-2 text-right">Broker P&L</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -156,7 +181,7 @@ export default function RiskPage() {
                         {r.net_lots > 0 ? '+' : ''}{r.net_lots.toFixed(2)}
                       </td>
                       <td className="px-3 py-2 text-right font-mono tabular-nums text-text-secondary">{r.trades}</td>
-                      <td className={cn('px-3 py-2 text-right font-mono tabular-nums font-bold', pnlClass(r.pnl))}>{fmtMoney(r.pnl)}</td>
+                      <td className={cn('px-3 py-2 text-right font-mono tabular-nums font-bold', pnlClass(-r.pnl))}>{fmtMoney(-r.pnl)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -168,10 +193,60 @@ export default function RiskPage() {
           <div className="rounded-lg border border-border-primary bg-bg-secondary overflow-hidden">
             <div className="px-4 py-2.5 border-b border-border-primary flex flex-wrap items-center justify-between gap-2">
               <div>
-                <h3 className="text-xs font-semibold text-text-primary">Running trades ({tradesTotal})</h3>
-                <p className="text-xxs text-text-tertiary mt-0.5">Every open position, live P&L per trade.</p>
+                <h3 className="text-xs font-semibold text-text-primary">Running trades ({userFilter ? `${visibleTrades.length} of ${tradesTotal}` : tradesTotal})</h3>
+                <p className="text-xxs text-text-tertiary mt-0.5">Every open position, live P&L per trade (from the user&apos;s side).</p>
               </div>
               <div className="flex flex-wrap items-center gap-1.5">
+                {/* Searchable user filter: type to search + pick from the list. */}
+                <div ref={userBoxRef} className="relative">
+                  <div className="flex items-center gap-1 min-w-[180px] text-xs py-1.5 px-2 bg-bg-input border border-border-primary rounded-md">
+                    <Search size={12} className="text-text-tertiary shrink-0" />
+                    <input
+                      value={userOpen ? userQuery : (selectedUser ? selectedUser.name : userQuery)}
+                      onChange={(e) => { setUserQuery(e.target.value); setUserOpen(true); }}
+                      onFocus={() => { setUserOpen(true); setUserQuery(''); }}
+                      placeholder="All users — search…"
+                      className="flex-1 bg-transparent outline-none text-text-primary placeholder:text-text-tertiary min-w-0"
+                    />
+                    {userFilter && (
+                      <button
+                        type="button"
+                        onClick={() => { setUserFilter(''); setUserQuery(''); setUserOpen(false); }}
+                        className="text-text-tertiary hover:text-danger shrink-0"
+                        title="Clear user filter"
+                      >
+                        <X size={12} />
+                      </button>
+                    )}
+                  </div>
+                  {userOpen && (
+                    <div className="absolute left-0 right-0 top-full mt-1 z-20 max-h-56 overflow-y-auto rounded-md border border-border-primary bg-bg-secondary shadow-dropdown">
+                      <button
+                        type="button"
+                        onClick={() => { setUserFilter(''); setUserQuery(''); setUserOpen(false); }}
+                        className="w-full text-left px-3 py-1.5 text-xs hover:bg-bg-hover border-b border-border-primary/50 text-text-secondary"
+                      >
+                        All users
+                      </button>
+                      {userMatches.length === 0 ? (
+                        <div className="px-3 py-2 text-xxs text-text-tertiary">No matching user.</div>
+                      ) : userMatches.map((u) => (
+                        <button
+                          key={u.email}
+                          type="button"
+                          onClick={() => { setUserFilter(u.email); setUserQuery(''); setUserOpen(false); }}
+                          className={cn(
+                            'w-full text-left px-3 py-1.5 hover:bg-bg-hover border-b border-border-primary/40 last:border-0',
+                            u.email === userFilter && 'bg-buy/10',
+                          )}
+                        >
+                          <span className="block text-xs text-text-primary">{u.name}</span>
+                          <span className="block text-[10px] text-text-tertiary">{u.email}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
                 <select
                   value={symbolFilter}
                   onChange={(e) => setSymbolFilter(e.target.value)}
@@ -218,9 +293,9 @@ export default function RiskPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {!trades.length ? (
-                    <tr><td colSpan={9} className="px-4 py-6 text-center text-xxs text-text-tertiary">No running trades{symbolFilter ? ` for ${symbolFilter}` : ''}.</td></tr>
-                  ) : trades.map((t) => (
+                  {!visibleTrades.length ? (
+                    <tr><td colSpan={9} className="px-4 py-6 text-center text-xxs text-text-tertiary">No running trades{userFilter ? ' for this user' : symbolFilter ? ` for ${symbolFilter}` : ''}.</td></tr>
+                  ) : visibleTrades.map((t) => (
                     <tr key={t.position_id} className="border-t border-border-primary/50 text-xs hover:bg-bg-hover/30">
                       <td className="px-3 py-2">
                         <span className="text-text-primary">{t.user_name}</span>

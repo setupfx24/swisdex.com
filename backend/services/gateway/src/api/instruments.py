@@ -1,4 +1,5 @@
 """Instruments API — List instruments, get current prices."""
+import asyncio
 import json as _json
 import logging
 import time as _time
@@ -253,6 +254,22 @@ async def _backfill_infoway_bars(
     if not bars:
         return []
 
+    # Snap provider times to the timeframe grid — InfoWay sometimes serves a
+    # range on an OFFSET grid (e.g. 1h bars at :30), which would double every
+    # candle when merged with the aligned series (verified live 2026-07-13).
+    tf_sec = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "4h": 14400, "1d": 86400}.get(tf, 300)
+    by_slot: dict[int, dict] = {}
+    slot_aligned: set = set()
+    for b in sorted(bars, key=lambda x: int(x["time"])):
+        t = int(b["time"])
+        slot = (t // tf_sec) * tf_sec
+        if t == slot:
+            by_slot[slot] = b
+            slot_aligned.add(slot)
+        elif slot not in slot_aligned and slot not in by_slot:
+            by_slot[slot] = {**b, "time": slot}
+    bars = [by_slot[k] for k in sorted(by_slot)]
+
     list_key = f"bars:{sym}:{tf}"
     existing_raw = await redis_client.lrange(list_key, 0, 999)
     seen_ts: set = set()
@@ -293,7 +310,41 @@ async def _backfill_infoway_bars(
     except Exception as exc:
         _logger.warning("infoway cache writeback failed for %s %s: %s", sym, tf, exc)
 
+    # Persist the fetched bars to the durable OHLC store too (fire-and-forget).
+    # Redis is capped at 1000 entries, so without this every deep pan is
+    # re-fetched forever and old history evaporates; with it, panning back
+    # permanently deepens ohlcv_<tf> (client 2026-07-13 "gaps in all TFs").
+    asyncio.create_task(_persist_ohlc_db(sym, tf, bars))
+
     return merged
+
+
+async def _persist_ohlc_db(sym: str, tf: str, bars: list[dict]) -> None:
+    """Upsert provider bars into ohlcv_<tf> (marketdata DB). Best-effort: the
+    table is created by market-data's OHLCStore.init(); if it doesn't exist
+    yet the upsert just logs at debug and the chart still works off Redis."""
+    if tf not in _OHLC_TABLES or not bars:
+        return
+    from packages.common.src.database import TimescaleSessionLocal
+    stmt = text(
+        f"INSERT INTO ohlcv_{tf} (time, symbol, open, high, low, close, volume, tick_count) "
+        "VALUES (to_timestamp(:t), :sym, :o, :h, :l, :c, :v, 0) "
+        "ON CONFLICT (symbol, time) DO UPDATE SET "
+        "open=EXCLUDED.open, high=EXCLUDED.high, low=EXCLUDED.low, "
+        "close=EXCLUDED.close, volume=EXCLUDED.volume"
+    )
+    try:
+        async with TimescaleSessionLocal() as session:
+            for b in bars:
+                await session.execute(stmt, {
+                    "t": int(b["time"]), "sym": sym,
+                    "o": float(b["open"]), "h": float(b["high"]),
+                    "l": float(b["low"]), "c": float(b["close"]),
+                    "v": float(b.get("volume", 0) or 0),
+                })
+            await session.commit()
+    except Exception as exc:
+        _logger.debug("ohlcv persist failed for %s %s: %s", sym, tf, exc)
 
 
 @router.get("/{symbol}/my-spread")
@@ -388,14 +439,37 @@ async def _fetch_ohlc_db(sym: str, tf: str, from_time: int, to_time: int) -> lis
         f"SELECT extract(epoch FROM time)::bigint AS t, open, high, low, close, volume "
         f"FROM ohlcv_{tf} WHERE {' AND '.join(conds)} ORDER BY time ASC LIMIT 5000"
     )
+
+    def _row(row) -> dict:
+        return {
+            "time": int(row.t), "open": float(row.open), "high": float(row.high),
+            "low": float(row.low), "close": float(row.close), "volume": float(row.volume or 0),
+        }
+
     out: list[dict] = []
     async with TimescaleSessionLocal() as session:
         res = await session.execute(q, params)
-        for row in res:
-            out.append({
-                "time": int(row.t), "open": float(row.open), "high": float(row.high),
-                "low": float(row.low), "close": float(row.close), "volume": float(row.volume or 0),
-            })
+        out = [_row(r) for r in res]
+        # Weekend / closed-market fallback: the chart asks for a RECENT window,
+        # which is empty when the market is shut (e.g. gold on Saturday). Rather
+        # than a blank chart, return the most recent bars up to `to` — the last
+        # real (Friday) candles. Only triggers when the strict window is thin
+        # (< 20), so normal weekday requests are untouched. (client 2026-07-11)
+        if len(out) < 20:
+            fb_conds = ["symbol = :sym"]
+            fb_params: dict = {"sym": sym}
+            if to_time:
+                fb_conds.append("time <= to_timestamp(:to_t)")
+                fb_params["to_t"] = int(to_time)
+            fb_q = text(
+                f"SELECT extract(epoch FROM time)::bigint AS t, open, high, low, close, volume "
+                f"FROM ohlcv_{tf} WHERE {' AND '.join(fb_conds)} ORDER BY time DESC LIMIT 500"
+            )
+            fb_res = await session.execute(fb_q, fb_params)
+            fb = [_row(r) for r in fb_res]
+            fb.reverse()  # newest-first → chronological
+            if len(fb) > len(out):
+                out = fb
     return out
 
 
@@ -430,9 +504,12 @@ async def get_bars(
     is_crypto = sym in _BINANCE_PAIRS
 
     def _filter_window(b: dict) -> bool:
+        # Only enforce the UPPER bound (never return bars after `to`). Do NOT use
+        # `from` as a hard floor: TradingView wants the most recent bars ENDING at
+        # `to`, and on a closed market (weekend) the latest real bars — e.g.
+        # Friday's gold — sit BEFORE the requested `from`. Dropping the floor lets
+        # them through instead of a blank chart. (client 2026-07-11)
         t = int(b.get("time", 0))
-        if from_time and t < from_time:
-            return False
         if to_time and t > to_time:
             return False
         return True
@@ -494,17 +571,37 @@ async def get_bars(
     # the host + code per market (forex/metals/indices/oil, crypto, stocks).
     # Triggers when Redis returned fewer bars than the window needs, or the user
     # is panning older than what's cached.
+    # "Not recent" must only trigger a backfill when the request actually wants
+    # the LIVE edge. A HISTORICAL window (TradingView paging back, e.g. April
+    # on the 1h chart) is never "recent" by definition — treating that as a
+    # cache miss fetched the LATEST 500 bars and REPLACED the DB's perfectly
+    # good old bars with them, so the old window came back empty and the chart
+    # showed a fake gap/cliff (client 2026-07-14).
+    wants_live_edge = not to_time or int(to_time) >= now_epoch - bar_sec * 3
     needs_backfill = (
-        not has_recent or len(bars) < 50 or (from_time and (not bars or from_time < bars[0]["time"]))
+        (wants_live_edge and not has_recent)
+        or len(bars) < 50
+        or (from_time and (not bars or from_time < bars[0]["time"]))
     )
     if needs_backfill:
         # Walk back from the oldest bar we already have so we extend rather than
-        # refetch what's in cache. end_ts=0 means "latest" (cold-cache case).
-        end_ts = bars[0]["time"] if bars and from_time and from_time < bars[0]["time"] else 0
+        # refetch what's in cache. end_ts=0 means "latest" (cold-cache case);
+        # for a historical window with no bars at all, anchor at the window end.
+        if bars and from_time and from_time < bars[0]["time"]:
+            end_ts = bars[0]["time"]
+        elif wants_live_edge:
+            end_ts = 0
+        else:
+            end_ts = int(to_time)
         merged = await _backfill_infoway_bars(sym, tf, end_ts=end_ts)
         if merged:
-            bars = [b for b in merged if _filter_window(b)]
-            bars.sort(key=lambda x: x["time"])
+            # MERGE with what we already have — the provider fetch covers ~500
+            # bars around end_ts and must never clobber DB bars elsewhere in
+            # the requested window.
+            by_t = {int(b["time"]): b for b in merged if _filter_window(b)}
+            for b in bars:
+                by_t.setdefault(int(b["time"]), b)
+            bars = sorted(by_t.values(), key=lambda x: x["time"])
 
     # --- 4. Append current in-progress bar ---
     current_raw = await redis_client.get(f"bar:current:{sym}:{tf}")

@@ -262,7 +262,7 @@ export default function ReferralPage() {
             <div>
               <p className="text-sm font-semibold text-text-primary">Commission breakdown</p>
               <p className="text-[11px] text-text-tertiary mt-0.5">
-                Where each commission came from — direct referral bounty vs AI Powered Staking — and from which friend.
+                Where each commission came from — direct referral bounty vs AI-POWERED STAKING PROGRAM — and from which friend.
               </p>
             </div>
             <div className="divide-y divide-border-primary/60 -mt-1">
@@ -298,9 +298,9 @@ export default function ReferralPage() {
         {head?.referral_code && (
           <section className="rounded-xl border border-border-primary bg-card p-5 space-y-3">
             <div>
-              <p className="text-sm font-semibold text-text-primary">AI Powered Staking — referral payout</p>
+              <p className="text-sm font-semibold text-text-primary">AI-POWERED STAKING PROGRAM — referral payout</p>
               <p className="text-[11px] text-text-tertiary mt-0.5">
-                When someone you referred locks into AI Powered Staking, choose how your commission is paid.
+                When someone you referred locks into AI-POWERED STAKING PROGRAM, choose how your commission is paid.
               </p>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">

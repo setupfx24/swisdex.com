@@ -43,7 +43,13 @@ async def list_transactions(
     exclude_types: list[str] | None = None,
     include_types: list[str] | None = None,
 ) -> PaginatedResponse:
-    query = select(Transaction)
+    # Hide promotional demo accounts from the admin ledger.
+    query = select(Transaction).where(
+        or_(
+            Transaction.user_id.is_(None),
+            Transaction.user_id.notin_(select(User.id).where(User.is_promotional == True)),  # noqa: E712
+        )
+    )
 
     if type_filter and type_filter != "all":
         query = query.where(Transaction.type == type_filter)

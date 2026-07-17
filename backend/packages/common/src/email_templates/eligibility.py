@@ -1,5 +1,5 @@
 """Eligibility-nudge email — fired when a user has a funded account and
-hasn't yet engaged with the Fixed Return or Trade Insurance products.
+hasn't yet engaged with the AI-POWERED STAKING PROGRAM or Trade Insurance products.
 
 The engine picks a single nudge based on which product is the better
 fit (FR for idle balances, Insurance for active traders) so users don't
@@ -35,7 +35,7 @@ def render_fr_insurance_eligibility(
         title = "Your balance can be earning"
         intro = (
             f"You're holding {_fmt_money(funded_balance)} on SwisDex. "
-            f"Fixed Return turns it into {fr_min_rate_pct:.0f}–{fr_max_rate_pct:.0f}% "
+            f"AI-POWERED STAKING PROGRAM turns it into {fr_min_rate_pct:.0f}–{fr_max_rate_pct:.0f}% "
             "annualized yield while you wait for the next setup."
         )
         body = kv_table([
@@ -46,11 +46,11 @@ def render_fr_insurance_eligibility(
         ]) + f"""
         <p style="margin:16px 0 0;color:#6b7280;font-size:13px;line-height:1.6;">
           Cash on the sidelines costs you yield. Allocate any portion of your
-          balance to a Fixed Return plan and SwisDex pays interest on the
+          balance to a AI-POWERED STAKING PROGRAM plan and SwisDex pays interest on the
           allocated amount until you withdraw — no trading required.
         </p>
         """
-        cta_label = "Browse Fixed Return plans"
+        cta_label = "Browse AI-POWERED STAKING PROGRAM plans"
         cta_url = f"{trader_app_url.rstrip('/')}/fixed-return"
         subject = "Earn yield on the cash you're not trading"
 
@@ -92,7 +92,7 @@ def render_fr_insurance_eligibility(
                        background:#f4f5f7;">
               <p style="margin:0 0 6px;color:#55a630;font-size:12px;font-weight:700;
                         letter-spacing:0.4px;text-transform:uppercase;">
-                Fixed Return
+                AI-POWERED STAKING PROGRAM
               </p>
               <p style="margin:0;color:#1a1a1a;font-size:14px;line-height:1.6;">
                 Earn {fr_min_rate_pct:.0f}–{fr_max_rate_pct:.0f}% p.a. on
@@ -116,7 +116,7 @@ def render_fr_insurance_eligibility(
           </tr>
         </table>
         """
-        cta_label = "Open Fixed Return"
+        cta_label = "Open AI-POWERED STAKING PROGRAM"
         cta_url = f"{trader_app_url.rstrip('/')}/fixed-return"
         secondary_cta_label = "Enable Insurance"
         secondary_cta_url = f"{trader_app_url.rstrip('/')}/insurance"
@@ -130,7 +130,7 @@ def render_fr_insurance_eligibility(
         )
         text = (
             f"Hi {name},\n\n{intro}\n\n"
-            f"Fixed Return: {cta_url}\n"
+            f"AI-POWERED STAKING PROGRAM: {cta_url}\n"
             f"Trade Insurance: {secondary_cta_url}\n"
         )
         return subject, html, text

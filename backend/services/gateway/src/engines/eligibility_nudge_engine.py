@@ -1,6 +1,6 @@
 """Eligibility-nudge engine.
 
-Watches for users who are funded enough to benefit from Fixed Return /
+Watches for users who are funded enough to benefit from AI-POWERED STAKING PROGRAM /
 Trade Insurance but haven't been emailed about either product. Picks
 the right flavor based on activity:
 
@@ -101,7 +101,8 @@ async def send_due_eligibility_nudges(db: AsyncSession) -> int:
 
     sent = 0
     for u in candidates:
-        if not u.email or bool(getattr(u, "is_demo", False)):
+        # Never email demo or promotional/showcase accounts.
+        if not u.email or bool(getattr(u, "is_demo", False)) or bool(getattr(u, "is_promotional", False)):
             continue
 
         # Aggregate funded balance across real trading accounts.

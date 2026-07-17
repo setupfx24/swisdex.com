@@ -1026,19 +1026,55 @@ async def modify_position(position_id: UUID, req, user_id: UUID, db: AsyncSessio
     sv = side_val(pos.side)
     updated = False
 
+    # MT5 semantics (client 2026-07-14): SL/TP validate against the CURRENT
+    # price the position would close at — NOT the open price — so break-even
+    # (SL = entry) and profit-locking stops (BUY SL above entry, below bid)
+    # are allowed. A BUY closes at bid: SL must sit below it, TP above it
+    # (else the level would trigger instantly); SELL mirrors on the ask.
+    # If no live quote exists (dead feed / closed market) we fall back to the
+    # conservative open-price rule rather than blindly accepting anything.
+    ref_bid = ref_ask = None
+    instrument = (await db.execute(
+        select(Instrument).where(Instrument.id == pos.instrument_id)
+    )).scalar_one_or_none()
+    if instrument is not None:
+        try:
+            raw_tick = await redis_client.get(PriceChannel.tick_key(instrument.symbol))
+            if raw_tick:
+                ref_bid, ref_ask = await user_close_quote(
+                    db, instrument, user_id, pos.account_id,
+                    acct_row.account_group_id, json.loads(raw_tick),
+                )
+        except Exception:
+            ref_bid = ref_ask = None
+
     if req.stop_loss is not None:
-        if sv == "buy" and req.stop_loss >= pos.open_price:
-            raise HTTPException(status_code=400, detail="BUY SL must be below open price")
-        if sv == "sell" and req.stop_loss <= pos.open_price:
-            raise HTTPException(status_code=400, detail="SELL SL must be above open price")
+        sl = Decimal(str(req.stop_loss))
+        if ref_bid is not None:
+            if sv == "buy" and sl >= ref_bid:
+                raise HTTPException(status_code=400, detail="BUY SL must be below the current price")
+            if sv == "sell" and sl <= ref_ask:
+                raise HTTPException(status_code=400, detail="SELL SL must be above the current price")
+        else:
+            if sv == "buy" and sl >= pos.open_price:
+                raise HTTPException(status_code=400, detail="BUY SL must be below open price")
+            if sv == "sell" and sl <= pos.open_price:
+                raise HTTPException(status_code=400, detail="SELL SL must be above open price")
         pos.stop_loss = req.stop_loss
         updated = True
 
     if req.take_profit is not None:
-        if sv == "buy" and req.take_profit <= pos.open_price:
-            raise HTTPException(status_code=400, detail="BUY TP must be above open price")
-        if sv == "sell" and req.take_profit >= pos.open_price:
-            raise HTTPException(status_code=400, detail="SELL TP must be below open price")
+        tp = Decimal(str(req.take_profit))
+        if ref_bid is not None:
+            if sv == "buy" and tp <= ref_bid:
+                raise HTTPException(status_code=400, detail="BUY TP must be above the current price")
+            if sv == "sell" and tp >= ref_ask:
+                raise HTTPException(status_code=400, detail="SELL TP must be below the current price")
+        else:
+            if sv == "buy" and tp <= pos.open_price:
+                raise HTTPException(status_code=400, detail="BUY TP must be above open price")
+            if sv == "sell" and tp >= pos.open_price:
+                raise HTTPException(status_code=400, detail="SELL TP must be below open price")
         pos.take_profit = req.take_profit
         updated = True
 

@@ -170,7 +170,7 @@ class PromotionalExpense(Base):
     """Admin-logged ad-hoc promotional give-away (migration 0088).
 
     Holds ONLY manual entries an admin records for promotional pay-outs that
-    have no existing ledger row — e.g. off-matrix extra Fixed Return interest
+    have no existing ledger row — e.g. off-matrix extra AI-POWERED STAKING PROGRAM interest
     or a custom benefit. Admin-only; never shown in a user's wallet history.
     The Promotional Expenses card sums these on top of the read-time
     aggregates over transactions / ib_commissions.

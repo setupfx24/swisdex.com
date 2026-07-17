@@ -398,7 +398,7 @@ export default function TransactionsPage() {
                     ['deposit', 'Deposits'],
                     ['withdrawal', 'Withdrawals'],
                     ['transfer', 'Transfers'],
-                    ['fixed_return', 'AI Powered Staking Program'],
+                    ['fixed_return', 'AI-POWERED STAKING PROGRAM'],
                     ['commission', 'IB Commissions'],
                   ] as const
                 ).map(([t, label]) => (
@@ -503,7 +503,7 @@ export default function TransactionsPage() {
                       'bg-buy/15 text-buy',
                     (tx.type === 'loss' || tx.type === 'correction') && 'bg-sell/15 text-sell',
                     tx.type === 'adjustment' && 'bg-bg-tertiary/40 text-text-secondary',
-                    // Fixed Return: amber tone so it reads distinctly from
+                    // AI-POWERED STAKING PROGRAM: amber tone so it reads distinctly from
                     // deposit/withdraw/profit-loss colours. Sign already drives
                     // the +/- amount color on the right, so the icon stays
                     // neutral-amber regardless of credit vs debit.

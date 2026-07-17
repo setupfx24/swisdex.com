@@ -54,10 +54,10 @@ const SECTIONS = [
     time of opt-in. Bonus equity is not in itself withdrawable.`,
   },
   {
-    h: '7. AI Powered Staking Program Plans',
-    p: `AI Powered Staking Program ("APSP") plans pay a contractual yield at maturity, underwritten by
+    h: '7. AI-POWERED STAKING PROGRAM Plans',
+    p: `AI-POWERED STAKING PROGRAM ("FRI") plans pay a contractual yield at maturity, underwritten by
     independent regulated insurance counterparties. Capital protection at maturity is subject to
-    the underwriter's continuing solvency and the policy terms. APSP plans are NOT bank deposits
+    the underwriter's continuing solvency and the policy terms. FRI plans are NOT bank deposits
     and are NOT covered by deposit-insurance schemes. Early withdrawal, where permitted, forfeits
     accrued yield and may incur an exit fee.`,
   },

@@ -4,7 +4,7 @@ import { useState, useMemo, useEffect, useRef } from 'react';
 import { usePathname } from 'next/navigation';
 import { clsx } from 'clsx';
 import toast from 'react-hot-toast';
-import { Minus, Plus, ChevronDown, ChevronLeft, Wifi, WifiOff } from 'lucide-react';
+import { Minus, Plus, ChevronDown, Wifi, WifiOff } from 'lucide-react';
 import { useTradingStore, type TradingAccount } from '@/stores/tradingStore';
 import { useUIStore } from '@/stores/uiStore';
 import api from '@/lib/api/client';
@@ -23,10 +23,6 @@ type OrderType = 'market' | 'pending';
 export default function OrderPanel() {
   const pathname = usePathname();
   const isTradingTerminal = Boolean(pathname?.startsWith('/trading/terminal'));
-  const {
-    terminalMarketsOpen,
-    toggleTerminalMarkets,
-  } = useUIStore();
 
   const {
     selectedSymbol,
@@ -393,33 +389,6 @@ export default function OrderPanel() {
               </div>
             )}
           </div>
-          {isTradingTerminal ? (
-            <div className="flex items-center gap-1 shrink-0">
-              <button
-                type="button"
-                onClick={() => {
-                  setSymbolPickerOpen(false);
-                  toggleTerminalMarkets();
-                }}
-                className="flex items-center gap-1 px-2 py-1 rounded-md border border-accent/40 text-accent hover:bg-accent/12 transition-colors"
-                aria-label={terminalMarketsOpen ? 'Hide markets' : 'Open markets'}
-                aria-expanded={terminalMarketsOpen}
-              >
-                <ChevronLeft
-                  className={clsx(
-                    'w-3.5 h-3.5 transition-transform duration-200',
-                    terminalMarketsOpen && '-rotate-90',
-                  )}
-                />
-                <span className="text-[9px] font-extrabold uppercase tracking-wider">Markets</span>
-              </button>
-              {/* One-click trading toggle removed 2026-06-01 — flag was
-                  stored in UIStore but handleSubmit never read it, so
-                  the button only changed its own colour and did nothing
-                  to order behaviour. Dropped until real one-click logic
-                  (confirmation-modal toggle) ships. */}
-            </div>
-          ) : null}
         </div>
         <div className="flex flex-col items-end shrink-0">
           <div className="flex items-center gap-1">

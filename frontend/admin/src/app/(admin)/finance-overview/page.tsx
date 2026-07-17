@@ -12,7 +12,7 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import toast from 'react-hot-toast';
-import { Loader2, X, TrendingUp, ArrowDownCircle, ArrowUpCircle, Gift, Lock, Clock, ChevronRight, Megaphone, Plus } from 'lucide-react';
+import { Loader2, X, TrendingUp, ArrowDownCircle, ArrowUpCircle, Gift, Lock, Clock, ChevronRight, Megaphone, Plus, Wallet } from 'lucide-react';
 import { adminApi } from '@/lib/api';
 import DateField from '@/components/ui/DateField';
 
@@ -31,6 +31,7 @@ interface Overview {
   };
   pending_deposits: { total: number; by_method: Row[] };
   pending_withdrawals: { total: number; by_method: Row[] };
+  total_withdrawable?: { total: number };
 }
 
 const fmt = (n: number | undefined) =>
@@ -341,9 +342,9 @@ export default function FinanceOverviewPage() {
       },
     },
     {
-      title: 'Fixed Return collected', value: data.fixed_return.collected, icon: Lock,
+      title: 'AI-POWERED STAKING PROGRAM collected', value: data.fixed_return.collected, icon: Lock,
       sub: `Payable: ${fmt(data.fixed_return.projected_payable)}`, drill: {
-        title: 'Fixed Return — by tenure & maturity',
+        title: 'AI-POWERED STAKING PROGRAM — by tenure & maturity',
         render: () => (
           <div className="space-y-4">
             {/* ── Overview tiles ── */}
@@ -421,7 +422,7 @@ export default function FinanceOverviewPage() {
             <div className="rounded-lg border border-border-primary overflow-hidden">
               <div className="px-3 py-2 bg-bg-tertiary/40 border-b border-border-primary">
                 <p className="text-xs font-semibold text-text-primary">Staking referral commission</p>
-                <p className="text-[10px] text-text-tertiary">Which referrer received how much from AI Powered Staking</p>
+                <p className="text-[10px] text-text-tertiary">Which referrer received how much from AI-POWERED STAKING PROGRAM</p>
               </div>
               <div className="p-2.5">
                 {(data.fixed_return.referral_commission?.length ?? 0) > 0 ? (
@@ -460,6 +461,28 @@ export default function FinanceOverviewPage() {
     {
       title: 'Pending Withdrawals', value: data.pending_withdrawals.total, icon: Clock,
       drill: { title: 'Pending withdrawals — by method (click for per-user)', render: () => methodTable(data.pending_withdrawals.by_method, 'amount', 'pending_withdrawals') },
+    },
+    {
+      title: 'Total Withdrawable (all users)', value: data.total_withdrawable?.total ?? 0, icon: Wallet,
+      sub: 'Sum of every user main-wallet balance — max the whole base could withdraw now',
+      drill: {
+        title: 'Total Withdrawable — details',
+        render: () => (
+          <div className="space-y-3">
+            <p className="text-xs text-text-secondary">
+              This is the live sum of every user&apos;s main-wallet balance — the withdrawable cash across the whole
+              user base (bonus, insurance grants and account credit are excluded because they can&apos;t be withdrawn).
+            </p>
+            <button
+              type="button"
+              onClick={() => setUserDrill({ title: 'Total Withdrawable — by user', section: 'total_withdrawable' })}
+              className="text-xs text-accent hover:underline inline-flex items-center gap-0.5"
+            >
+              View by user <ChevronRight size={11} />
+            </button>
+          </div>
+        ),
+      },
     },
   ];
 
@@ -552,7 +575,7 @@ export default function FinanceOverviewPage() {
             </div>
             <div className="p-5 space-y-3">
               <p className="text-xxs text-text-tertiary">
-                Log a give-away that has no other record (e.g. extra Fixed Return interest or a custom benefit).
+                Log a give-away that has no other record (e.g. extra AI-POWERED STAKING PROGRAM interest or a custom benefit).
                 It's added to the Promotional Expenses total. To also move money into a user's wallet, use Add Fund on the user page.
               </p>
               <div>
@@ -571,8 +594,8 @@ export default function FinanceOverviewPage() {
                   onChange={(e) => setAddForm({ ...addForm, category: e.target.value })}
                   className="w-full mt-1 rounded-md bg-bg-tertiary border border-border-primary px-3 py-2 text-sm text-text-primary"
                 >
-                  <option value="extra_fr_interest">Extra Fixed Return interest</option>
-                  <option value="fr_referral_bonus">Fixed Return referral bonus</option>
+                  <option value="extra_fr_interest">Extra AI-POWERED STAKING PROGRAM interest</option>
+                  <option value="fr_referral_bonus">AI-POWERED STAKING PROGRAM referral bonus</option>
                   <option value="custom_benefit">Custom promotional benefit</option>
                   <option value="manual">Other</option>
                 </select>

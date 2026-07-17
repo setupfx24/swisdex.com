@@ -80,7 +80,7 @@ def render_statement_digest(
     if float(bonus_credited) > 0:
         rows.append(("Bonus credited", _fmt_money(bonus_credited, currency)))
     if float(fr_interest_credited) > 0:
-        rows.append(("Fixed Return interest", _fmt_money(fr_interest_credited, currency)))
+        rows.append(("AI-POWERED STAKING PROGRAM interest", _fmt_money(fr_interest_credited, currency)))
     if float(insurance_refunds) > 0:
         rows.append(("Insurance refunds", _fmt_money(insurance_refunds, currency)))
     rows.append(("Closing balance", _fmt_money(closing_balance, currency)))

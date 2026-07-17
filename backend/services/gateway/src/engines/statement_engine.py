@@ -220,7 +220,8 @@ async def send_due_statements(db: AsyncSession) -> tuple[int, int]:
     sent_w = 0
     sent_m = 0
     for u in users:
-        if not u.email or bool(getattr(u, "is_demo", False)):
+        # Never email demo or promotional/showcase accounts.
+        if not u.email or bool(getattr(u, "is_demo", False)) or bool(getattr(u, "is_promotional", False)):
             continue
 
         acct_rows = (await db.execute(

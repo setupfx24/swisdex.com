@@ -110,6 +110,8 @@ async def stats(
 ) -> dict:
     """24h + 7d + lifetime fee revenue, payouts, and gross margin."""
     now = datetime.now(timezone.utc)
+    # Promotional demo accounts are hidden from the admin panel.
+    promo_ids = select(User.id).where(User.is_promotional == True)  # noqa: E712
     windows = {
         "24h": now - timedelta(days=1),
         "7d":  now - timedelta(days=7),
@@ -118,13 +120,15 @@ async def stats(
     out: dict[str, Any] = {}
     for label, since in windows.items():
         # Fees
-        fee_q = select(func.coalesce(func.sum(InsurancePolicy.fee), 0))
+        fee_q = select(func.coalesce(func.sum(InsurancePolicy.fee), 0)).where(
+            InsurancePolicy.user_id.notin_(promo_ids))
         if since is not None:
             fee_q = fee_q.where(InsurancePolicy.activated_at >= since)
         fees = Decimal(str((await db.execute(fee_q)).scalar_one() or 0))
 
         # Payouts
-        pay_q = select(func.coalesce(func.sum(InsuranceClaim.claim_amount), 0))
+        pay_q = select(func.coalesce(func.sum(InsuranceClaim.claim_amount), 0)).where(
+            InsuranceClaim.user_id.notin_(promo_ids))
         if since is not None:
             pay_q = pay_q.where(InsuranceClaim.paid_at >= since)
         payouts = Decimal(str((await db.execute(pay_q)).scalar_one() or 0))
@@ -132,11 +136,13 @@ async def stats(
         # Counts
         pol_count = (await db.execute(
             select(func.count(InsurancePolicy.id))
-            .where(*([InsurancePolicy.activated_at >= since] if since is not None else []))
+            .where(InsurancePolicy.user_id.notin_(promo_ids),
+                   *([InsurancePolicy.activated_at >= since] if since is not None else []))
         )).scalar_one()
         clm_count = (await db.execute(
             select(func.count(InsuranceClaim.id))
-            .where(*([InsuranceClaim.paid_at >= since] if since is not None else []))
+            .where(InsuranceClaim.user_id.notin_(promo_ids),
+                   *([InsuranceClaim.paid_at >= since] if since is not None else []))
         )).scalar_one()
 
         out[label] = {
@@ -150,6 +156,7 @@ async def stats(
     # Top claimants (lifetime) — fraud watch
     top_q = await db.execute(
         select(InsuranceClaim.user_id, func.sum(InsuranceClaim.claim_amount).label("total"))
+        .where(InsuranceClaim.user_id.notin_(promo_ids))
         .group_by(InsuranceClaim.user_id)
         .order_by(func.sum(InsuranceClaim.claim_amount).desc())
         .limit(10)

@@ -1,4 +1,4 @@
-"""Fixed Return v2 — periodic interest payouts, fixed lock months.
+"""AI-POWERED STAKING PROGRAM v2 — periodic interest payouts, fixed lock months.
 
 Tenure controls the PAYOUT CADENCE; the full lock duration is a single
 admin setting (``fixed_return_lock_months``, default 24). Interest is
@@ -37,11 +37,30 @@ DAYS_PER_MONTH_APPROX = Decimal("30.4375")
 
 # ─── Config ──────────────────────────────────────────────────────────
 
+async def _payout_window_days() -> tuple[int, int]:
+    """Admin-set day-of-month range (inclusive, default 25–30) during which
+    interest payouts happen — BOTH the scheduled engine credit and the
+    on-demand "Withdraw interest" button (client 2026-07-13: outside the
+    window the button is disabled and the API refuses)."""
+    window_start = await get_int_setting("fixed_return_payout_day_start", 25)
+    window_end = await get_int_setting("fixed_return_payout_day_end", 30)
+    if window_start < 1:
+        window_start = 1
+    if window_end > 31:
+        window_end = 31
+    if window_start > window_end:
+        window_start, window_end = window_end, window_start
+    return window_start, window_end
+
+
 async def get_config(
     *, user_id: UUID | None = None, db: AsyncSession | None = None,
 ) -> dict:
     raw = await get_system_setting("fixed_return_rates", None)
     rates = raw if isinstance(raw, dict) and raw.get("tiers") else _fallback_rates()
+    # Standard (post-launch) ladder — kept as-is for the UI's comparison sheet
+    # even when the pre-launch matrix below becomes the effective one.
+    base_matrix = rates.get("rate_matrix_pct")
     fee_pct = await get_float_setting(
         "fixed_return_early_withdrawal_fee_pct", DEFAULT_FEE_PCT,
     )
@@ -71,11 +90,41 @@ async def get_config(
                     rates = {**rates, "rate_matrix_pct": ov_matrix}
                     has_override = True
 
+    # Pre-launch offer (client 2026-07-14): admin-managed alternate rate matrix
+    # shown behind the "Pre launch" button on the trader page. While ENABLED it
+    # is also the EFFECTIVE matrix for new locks — the sheet users see is the
+    # rate they get. A per-user override (personal deal) still wins over it.
+    prelaunch_out = None
+    pre_raw = await get_system_setting("fixed_return_prelaunch", None)
+    if isinstance(pre_raw, dict) and pre_raw.get("enabled"):
+        pm = pre_raw.get("rate_matrix_pct")
+        if (
+            isinstance(pm, list) and len(pm) == len(rates["tenures"])
+            and all(isinstance(r, list) and len(r) == len(rates["tiers"]) for r in pm)
+        ):
+            prelaunch_out = {
+                "enabled": True,
+                "headline": str(pre_raw.get("headline") or "Pre-launch offer"),
+                "rate_matrix_pct": pm,
+            }
+            if not has_override:
+                rates = {**rates, "rate_matrix_pct": pm}
+
+    window_start, window_end = await _payout_window_days()
     return {
         **rates,
         "early_withdrawal_fee_pct": fee_pct,
         "lock_months": lock_months,
         "has_personal_override": has_override,
+        "base_rate_matrix_pct": base_matrix,
+        "prelaunch": prelaunch_out,
+        # Interest-payout window: scheduled payouts and the on-demand
+        # "Withdraw interest" action only work on these days of the month.
+        # The open/closed flag is computed server-side (UTC) so the UI and
+        # the API gate can never disagree.
+        "payout_day_start": window_start,
+        "payout_day_end": window_end,
+        "payout_window_open": window_start <= datetime.now(timezone.utc).day <= window_end,
     }
 
 
@@ -135,7 +184,7 @@ def _tenure_to_months(tenure_days: int) -> int:
     """Map the configured tenure_days bucket to whole calendar months so
     payouts always land on the same day-of-month (the configured payout
     day-of-month gate, 25 by default). The buckets follow the admin
-    Fixed Return matrix: 30 → 1, 90 → 3, 180 → 6, 365 → 12, 730 → 24."""
+    AI-POWERED STAKING PROGRAM matrix: 30 → 1, 90 → 3, 180 → 6, 365 → 12, 730 → 24."""
     if tenure_days >= 700:
         return 24
     if tenure_days >= 350:
@@ -290,7 +339,7 @@ async def _pay_fr_referral(
             amount=commission,
             balance_after=None,
             description=(
-                f"AI Powered Staking referral from {referred_display} — {pct}% of "
+                f"AI-POWERED STAKING PROGRAM referral from {referred_display} — {pct}% of "
                 f"{'principal' if kind == 'principal' else 'interest payout'}"
             ),
         ))
@@ -307,7 +356,7 @@ async def _pay_fr_referral(
                     amount=extra,
                     category="fr_referral_extra",
                     note=(
-                        f"AI Powered Staking referral — extra {extra_pct}% "
+                        f"AI-POWERED STAKING PROGRAM referral — extra {extra_pct}% "
                         f"(paid {pct}% vs standard {global_pct}%) on "
                         f"{'principal' if kind == 'principal' else 'interest payout'} "
                         f"from {referred_display}"
@@ -399,7 +448,7 @@ async def create_lock(
             type="bonus_forfeit",
             amount=-bonus,
             balance_after=user.main_wallet_balance,
-            description=f"Bonus forfeited — locked ${principal:,.2f} into AI Powered Staking",
+            description=f"Bonus forfeited — locked ${principal:,.2f} into AI-POWERED STAKING PROGRAM",
         ))
     # Maturity = anniversary − 1 day (Mig 0067 / client spec 2026-06-08)
     # so users can withdraw on the eve of their lock anniversary.
@@ -439,7 +488,7 @@ async def create_lock(
         type="fixed_return_lock",
         amount=-principal,
         balance_after=user.main_wallet_balance,
-        description=f"Fixed Return lock — {tenure['label']} cycle @ {rate_pct}% / {lock_months}m",
+        description=f"AI-POWERED STAKING PROGRAM lock — {tenure['label']} cycle @ {rate_pct}% / {lock_months}m",
     ))
 
     # AI-Staking referral: pay the referrer their principal-% commission now
@@ -449,6 +498,299 @@ async def create_lock(
     await db.commit()
     await db.refresh(lock)
     return _serialize_lock(lock)
+
+
+# ─── Plan upgrade (client 2026-07-11) ────────────────────────────────
+# A holder can UPGRADE an active lock to a HIGHER tenure (Month < Quarter
+# < Half-Year < Year < 2-Year — never same or lower). On upgrade:
+#   1. the elapsed (un-paid) interest of the current plan is prorated for
+#      the days since the last payout (or lock) and CREDITED to the wallet,
+#   2. the current lock is closed (state='upgraded'),
+#   3. a top-up = principal × topup_pct% (admin setting, default 25) is
+#      AUTO-DEBITED from the wallet,
+#   4. a NEW lock opens with new_principal = old principal + top-up at the
+#      chosen higher tenure, fresh lock months. Everything else (rate matrix,
+#      payout cadence, referral) behaves exactly like a normal lock.
+
+DEFAULT_UPGRADE_TOPUP_PCT = 25.0
+
+
+def _accrual_anchor(lock: FixedReturnLock) -> datetime:
+    """The datetime interest starts accruing FROM for the current unpaid
+    stretch: the later of (a) the last scheduled payout / lock start and
+    (b) last_interest_at (set by an on-demand interest withdrawal). Anchoring
+    at the max prevents double-paying interest a user already pulled out."""
+    if lock.payouts_count and lock.next_payout_at:
+        nxt = lock.next_payout_at
+        if nxt.tzinfo is None:
+            nxt = nxt.replace(tzinfo=timezone.utc)
+        cycle_months = _tenure_to_months(int(lock.tenure_days or 0))
+        anchor = _add_months(nxt, -cycle_months)
+    else:
+        anchor = lock.locked_at
+    if anchor and anchor.tzinfo is None:
+        anchor = anchor.replace(tzinfo=timezone.utc)
+    li = lock.last_interest_at
+    if li is not None:
+        if li.tzinfo is None:
+            li = li.replace(tzinfo=timezone.utc)
+        if anchor is None or li > anchor:
+            anchor = li
+    return anchor
+
+
+async def _elapsed_unpaid_interest(lock: FixedReturnLock, now: datetime) -> Decimal:
+    """Prorated interest earned since the accrual anchor that hasn't been
+    credited yet: principal × rate_pct% × days_since / 30."""
+    anchor = _accrual_anchor(lock)
+    days = max(0, (now.date() - anchor.date()).days) if anchor else 0
+    if days <= 0:
+        return Decimal("0")
+    return (
+        Decimal(str(lock.principal or 0))
+        * Decimal(str(lock.rate_pct or 0))
+        * Decimal(str(days))
+        / Decimal("100")
+        / Decimal("30")
+    ).quantize(Decimal("0.01"))
+
+
+async def withdraw_interest(lock_id: UUID, user_id: UUID, db: AsyncSession) -> dict:
+    """On-demand interest withdrawal (client 2026-07-11): credit the accrued
+    unpaid interest straight to the main wallet — NO admin approval (it's the
+    user's already-earned interest). Only the interest moves; principal stays
+    locked and keeps running. Resets the accrual floor to now."""
+    lock = (await db.execute(
+        select(FixedReturnLock).where(FixedReturnLock.id == lock_id).with_for_update()
+    )).scalar_one_or_none()
+    if lock is None or lock.user_id != user_id:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    if lock.state != "active":
+        raise HTTPException(status_code=400, detail=f"Interest can only be withdrawn from an active plan (this is {lock.state}).")
+
+    now = datetime.now(timezone.utc)
+    # Same admin-set day-of-month window as the scheduled payout engine
+    # (client 2026-07-13): outside it the withdrawal is refused — the UI
+    # shows the button disabled, this is the server-side backstop.
+    window_start, window_end = await _payout_window_days()
+    if not (window_start <= now.day <= window_end):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Interest withdrawal is only available from day {window_start} "
+                f"to {window_end} of each month. Your interest keeps accruing "
+                f"until then."
+            ),
+        )
+    interest = await _elapsed_unpaid_interest(lock, now)
+    if interest <= 0:
+        raise HTTPException(status_code=400, detail="No interest has accrued yet to withdraw.")
+
+    user = (await db.execute(
+        select(User).where(User.id == user_id).with_for_update()
+    )).scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    user.main_wallet_balance = Decimal(str(user.main_wallet_balance or 0)) + interest
+    lock.total_interest_paid = Decimal(str(lock.total_interest_paid or 0)) + interest
+    lock.payouts_count = int(lock.payouts_count or 0) + 1
+    lock.last_interest_at = now
+    db.add(Transaction(
+        user_id=user_id,
+        type="fixed_return_interest",
+        amount=interest,
+        balance_after=user.main_wallet_balance,
+        description=f"AI Powered Staking — interest withdrawn ({lock.tenure_label} plan)",
+    ))
+    # Referral: interest-mode commission on this payout, if configured.
+    await _pay_fr_referral(db, user_id, interest, "interest")
+    await db.commit()
+    await db.refresh(lock)
+    return {
+        "interest_withdrawn": float(interest),
+        "new_wallet_balance": float(user.main_wallet_balance),
+        "lock": _serialize_lock(lock),
+    }
+
+
+async def upgrade_lock(
+    lock_id: UUID,
+    user_id: UUID,
+    new_tenure_label: str,
+    db: AsyncSession,
+) -> dict:
+    lock = (await db.execute(
+        select(FixedReturnLock).where(FixedReturnLock.id == lock_id).with_for_update()
+    )).scalar_one_or_none()
+    if lock is None or lock.user_id != user_id:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    if lock.state != "active":
+        raise HTTPException(status_code=400, detail=f"Only an active plan can be upgraded (this is {lock.state}).")
+
+    cfg = await get_config(user_id=user_id, db=db)
+    tiers = cfg["tiers"]
+    tenures = cfg["tenures"]
+    matrix = cfg["rate_matrix_pct"]
+    lock_months = int(cfg.get("lock_months") or DEFAULT_LOCK_MONTHS)
+
+    cur_tenure_idx = _resolve_tenure_index(lock.tenure_label, tenures)
+    new_tenure_idx = _resolve_tenure_index(new_tenure_label, tenures)
+    if new_tenure_idx < 0:
+        raise HTTPException(status_code=400, detail=f"Unknown plan '{new_tenure_label}'")
+    if new_tenure_idx <= cur_tenure_idx:
+        raise HTTPException(
+            status_code=400,
+            detail="You can only upgrade to a higher plan than your current one.",
+        )
+
+    topup_pct = Decimal(str(await get_float_setting(
+        "fixed_return_upgrade_topup_pct", DEFAULT_UPGRADE_TOPUP_PCT,
+    )))
+    old_principal = Decimal(str(lock.principal or 0))
+    top_up = (old_principal * topup_pct / Decimal("100")).quantize(Decimal("0.01"))
+    new_principal = (old_principal + top_up).quantize(Decimal("0.01"))
+
+    user = (await db.execute(
+        select(User).where(User.id == user_id).with_for_update()
+    )).scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    balance = Decimal(str(user.main_wallet_balance or 0))
+    if balance < top_up:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Upgrade needs a ${top_up:,.2f} top-up ({topup_pct}% of your "
+                f"${old_principal:,.2f} principal) but your wallet has ${balance:,.2f}."
+            ),
+        )
+
+    now = datetime.now(timezone.utc)
+
+    # 1) Credit elapsed unpaid interest of the current plan to the wallet.
+    elapsed_interest = await _elapsed_unpaid_interest(lock, now)
+    if elapsed_interest > 0:
+        user.main_wallet_balance = Decimal(str(user.main_wallet_balance or 0)) + elapsed_interest
+        lock.total_interest_paid = Decimal(str(lock.total_interest_paid or 0)) + elapsed_interest
+        db.add(Transaction(
+            user_id=user_id,
+            type="fixed_return_interest",
+            amount=elapsed_interest,
+            balance_after=user.main_wallet_balance,
+            description=f"AI Powered Staking upgrade — elapsed interest of {lock.tenure_label} plan",
+        ))
+
+    # 2) Close the old plan.
+    lock.state = "upgraded"
+    lock.settled_at = now
+    lock.next_payout_at = None
+
+    # 3) Auto-debit the top-up from the wallet.
+    user.main_wallet_balance = Decimal(str(user.main_wallet_balance or 0)) - top_up
+    db.add(Transaction(
+        user_id=user_id,
+        type="fixed_return_upgrade_topup",
+        amount=-top_up,
+        balance_after=user.main_wallet_balance,
+        description=f"AI Powered Staking upgrade top-up ({topup_pct}% of ${old_principal:,.2f})",
+    ))
+
+    # 4) Open the new higher-tenure plan with new_principal (old + top-up).
+    new_tier_idx = _resolve_tier_index(new_principal, tiers)
+    if new_tier_idx < 0:
+        new_tier_idx = 0
+    rate_pct = Decimal(str(matrix[new_tenure_idx][new_tier_idx]))
+    tenure = tenures[new_tenure_idx]
+    tenure_days = int(tenure["days"])
+    matures_at = _add_months(now, lock_months) - timedelta(days=1)
+    payout_dom = await get_int_setting("fixed_return_payout_day_of_month", 25)
+    cycle_months = _tenure_to_months(tenure_days)
+    next_payout_at = _first_payout_date(now, cycle_months, payout_day=payout_dom)
+    if next_payout_at > matures_at:
+        next_payout_at = matures_at
+
+    new_lock = FixedReturnLock(
+        user_id=user_id,
+        principal=new_principal,
+        tier_label=tiers[new_tier_idx]["label"],
+        tenure_label=tenure["label"],
+        tenure_days=tenure_days,
+        rate_pct=rate_pct,
+        locked_at=now,
+        matures_at=matures_at,
+        next_payout_at=next_payout_at,
+        lock_months_at_creation=lock_months,
+        state="active",
+    )
+    db.add(new_lock)
+    db.add(Transaction(
+        user_id=user_id,
+        type="fixed_return_lock",
+        amount=Decimal("0"),
+        balance_after=user.main_wallet_balance,
+        description=(
+            f"AI Powered Staking upgraded to {tenure['label']} @ {rate_pct}% / {lock_months}m "
+            f"(new principal ${new_principal:,.2f})"
+        ),
+    ))
+    # Upgrade grows the principal — pay the referrer their principal-% on the
+    # top-up only (the original principal already paid at the first lock).
+    await _pay_fr_referral(db, user_id, top_up, "principal")
+
+    await db.commit()
+    await db.refresh(new_lock)
+    return {
+        "message": "Plan upgraded",
+        "elapsed_interest_credited": float(elapsed_interest),
+        "topup_debited": float(top_up),
+        "topup_pct": float(topup_pct),
+        "new_lock": _serialize_lock(new_lock),
+    }
+
+
+async def upgrade_options(lock_id: UUID, user_id: UUID, db: AsyncSession) -> dict:
+    """Preview: which higher tenures a lock can upgrade to + the top-up cost
+    and elapsed interest, so the trader UI can render the upgrade modal."""
+    lock = (await db.execute(
+        select(FixedReturnLock).where(FixedReturnLock.id == lock_id)
+    )).scalar_one_or_none()
+    if lock is None or lock.user_id != user_id:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    cfg = await get_config(user_id=user_id, db=db)
+    tenures = cfg["tenures"]
+    tiers = cfg["tiers"]
+    matrix = cfg["rate_matrix_pct"]
+    cur_idx = _resolve_tenure_index(lock.tenure_label, tenures)
+    topup_pct = Decimal(str(await get_float_setting(
+        "fixed_return_upgrade_topup_pct", DEFAULT_UPGRADE_TOPUP_PCT,
+    )))
+    old_principal = Decimal(str(lock.principal or 0))
+    top_up = (old_principal * topup_pct / Decimal("100")).quantize(Decimal("0.01"))
+    new_principal = old_principal + top_up
+    now = datetime.now(timezone.utc)
+    elapsed = await _elapsed_unpaid_interest(lock, now)
+    new_tier_idx = max(0, _resolve_tier_index(new_principal, tiers))
+    options = []
+    for i, t in enumerate(tenures):
+        if i <= cur_idx:
+            continue
+        options.append({
+            "tenure_label": t["label"],
+            "new_rate_pct": float(matrix[i][new_tier_idx]),
+        })
+    return {
+        "lock_id": str(lock.id),
+        "current_tenure": lock.tenure_label,
+        "current_principal": float(old_principal),
+        "topup_pct": float(topup_pct),
+        "topup_amount": float(top_up),
+        "new_principal": float(new_principal),
+        "elapsed_interest": float(elapsed),
+        "can_upgrade": len(options) > 0,
+        "options": options,
+    }
 
 
 async def admin_grant_lock(
@@ -565,7 +907,7 @@ async def admin_grant_lock(
             amount=-principal,
             balance_after=user.main_wallet_balance,
             description=(
-                f"Admin-created Fixed Return lock — {tenure['label']} cycle @ "
+                f"Admin-created AI-POWERED STAKING PROGRAM lock — {tenure['label']} cycle @ "
                 f"{rate_pct}% / {lock_months}m{desc_extra}"
             ),
         ))
@@ -579,7 +921,7 @@ async def admin_grant_lock(
             amount=Decimal("0"),
             balance_after=Decimal(str(user.main_wallet_balance or 0)),
             description=(
-                f"Admin-granted Fixed Return — principal ${principal:,.2f}, "
+                f"Admin-granted AI-POWERED STAKING PROGRAM — principal ${principal:,.2f}, "
                 f"{tenure['label']} cycle @ {rate_pct}% / {lock_months}m"
                 f" (broker-funded){desc_extra}"
             ),
@@ -628,25 +970,24 @@ async def withdraw_lock(
         matures_at = matures_at.replace(tzinfo=timezone.utc)
 
     if matures_at and matures_at <= now:
-        # Matured — interest was already paid in cycles; user gets the
-        # principal back, period. Fires immediately; no admin review.
-        payout = principal
-        fee = Decimal("0")
-        user.main_wallet_balance = Decimal(str(user.main_wallet_balance or 0)) + payout
-        lock.state = "matured"
-        lock.payout = payout
-        lock.fee_paid = fee
-        lock.settled_at = now
+        # Matured — principal claim now routes through ADMIN APPROVAL (client
+        # 2026-07-11) instead of an instant credit. Park in principal_pending
+        # so it surfaces on the admin AI-Powered Staking approval queue + bell;
+        # admin approve() credits the principal and flips to matured.
+        if lock.state == "principal_pending":
+            raise HTTPException(
+                status_code=409,
+                detail="A principal-withdrawal request is already pending admin approval",
+            )
+        lock.state = "principal_pending"
+        lock.early_requested_at = now   # reuse the request-timestamp column
         lock.next_payout_at = None
         db.add(Transaction(
             user_id=user_id,
-            type="fixed_return_matured",
-            amount=payout,
+            type="fixed_return_principal_request",
+            amount=Decimal("0"),
             balance_after=user.main_wallet_balance,
-            description=(
-                f"Fixed Return matured — principal returned "
-                f"(interest paid in {lock.payouts_count} cycles: ${total_interest:,.2f})"
-            ),
+            description=f"AI Powered Staking — principal withdrawal requested (${principal:,.2f}), awaiting admin approval",
         ))
         await db.commit()
         await db.refresh(lock)
@@ -672,7 +1013,7 @@ async def withdraw_lock(
         amount=Decimal("0"),
         balance_after=Decimal(str(user.main_wallet_balance or 0)),
         description=(
-            f"Fixed Return early-withdrawal request filed — awaiting admin "
+            f"AI-POWERED STAKING PROGRAM early-withdrawal request filed — awaiting admin "
             f"approval (principal ${principal:,.2f}, "
             f"interest-to-date ${total_interest:,.2f})"
         ),
@@ -734,7 +1075,7 @@ async def admin_approve_early_withdrawal(
         amount=payout,
         balance_after=user.main_wallet_balance,
         description=(
-            f"Fixed Return early withdrawal (approved) — penalty ${fee:,.2f} + "
+            f"AI-POWERED STAKING PROGRAM early withdrawal (approved) — penalty ${fee:,.2f} + "
             f"interest claw-back ${total_interest:,.2f}"
         ),
     ))
@@ -789,7 +1130,7 @@ async def admin_reject_early_withdrawal(
         amount=Decimal("0"),
         balance_after=Decimal("0"),  # no balance change, informational
         description=(
-            f"Fixed Return early-withdrawal request rejected by admin"
+            f"AI-POWERED STAKING PROGRAM early-withdrawal request rejected by admin"
             + (f": {reason}" if reason else "")
         ),
     ))
@@ -855,14 +1196,7 @@ async def accrue_due_payouts(db: AsyncSession) -> int:
     """
     now = datetime.now(timezone.utc)
 
-    window_start = await get_int_setting("fixed_return_payout_day_start", 25)
-    window_end = await get_int_setting("fixed_return_payout_day_end", 30)
-    if window_start < 1:
-        window_start = 1
-    if window_end > 31:
-        window_end = 31
-    if window_start > window_end:
-        window_start, window_end = window_end, window_start
+    window_start, window_end = await _payout_window_days()
     if not (window_start <= now.day <= window_end):
         return 0
 
@@ -884,35 +1218,22 @@ async def accrue_due_payouts(db: AsyncSession) -> int:
                 lock.next_payout_at = None
                 continue
 
-            # Rate matrix cell is a PER-MONTH percentage. Tenure decides
-            # cadence; each cycle bundles `months_per_cycle` months of
-            # accrual into one credit.
+            # Rate matrix cell is a PER-MONTH percentage. Interest is credited
+            # for the days between the accrual anchor and now — the anchor is
+            # the later of the last scheduled cycle / lock start and
+            # last_interest_at (an on-demand interest withdrawal). This one
+            # formula prorates the first cycle AND avoids double-paying any
+            # interest the user already pulled out on demand.
             months_per_cycle = _tenure_to_months(int(lock.tenure_days or 0))
-
-            # Client spec 2026-06-08 (revised): the FIRST cycle is
-            # PRORATED by the actual days between lock_at and now. So a
-            # user who invests on the 8th and gets paid on the 25th
-            # receives 17/30 of one month's interest, not a full month.
-            # Subsequent cycles credit the full `months_per_cycle × rate`.
-            if int(lock.payouts_count or 0) == 0:
-                locked_at = lock.locked_at
-                if locked_at and locked_at.tzinfo is None:
-                    locked_at = locked_at.replace(tzinfo=timezone.utc)
-                days_locked = max(1, (now.date() - locked_at.date()).days) if locked_at else 30
-                interest = (
-                    Decimal(str(lock.principal or 0))
-                    * Decimal(str(lock.rate_pct or 0))
-                    * Decimal(str(days_locked))
-                    / Decimal("100")
-                    / Decimal("30")
-                ).quantize(Decimal("0.01"))
-            else:
-                interest = (
-                    Decimal(str(lock.principal or 0))
-                    * Decimal(str(lock.rate_pct or 0))
-                    * Decimal(str(months_per_cycle))
-                    / Decimal("100")
-                ).quantize(Decimal("0.01"))
+            anchor = _accrual_anchor(lock)
+            days_accrued = max(0, (now.date() - anchor.date()).days) if anchor else 0
+            interest = (
+                Decimal(str(lock.principal or 0))
+                * Decimal(str(lock.rate_pct or 0))
+                * Decimal(str(days_accrued))
+                / Decimal("100")
+                / Decimal("30")
+            ).quantize(Decimal("0.01"))
             if interest <= 0:
                 lock.next_payout_at = None
                 continue
@@ -924,6 +1245,9 @@ async def accrue_due_payouts(db: AsyncSession) -> int:
                 Decimal(str(lock.total_interest_paid or 0)) + interest
             )
             lock.payouts_count = int(lock.payouts_count or 0) + 1
+            # Reset the accrual floor to this credit moment so the next stretch
+            # (scheduled or on-demand) starts fresh from here.
+            lock.last_interest_at = now
 
             # Advance the schedule by exactly one calendar cycle. Per
             # client spec 2026-06-08, the cycle day-of-month locks to
@@ -951,7 +1275,7 @@ async def accrue_due_payouts(db: AsyncSession) -> int:
                 amount=interest,
                 balance_after=user.main_wallet_balance,
                 description=(
-                    f"Fixed Return interest — {lock.tenure_label} cycle "
+                    f"AI-POWERED STAKING PROGRAM interest — {lock.tenure_label} cycle "
                     f"#{lock.payouts_count} ({lock.rate_pct}%)"
                 ),
             ))
@@ -971,9 +1295,9 @@ async def accrue_due_payouts(db: AsyncSession) -> int:
                 )
                 db.add(Notification(
                     user_id=lock.user_id,
-                    title="Fixed Return payout received",
+                    title="AI-POWERED STAKING PROGRAM payout received",
                     message=(
-                        f"${float(interest):,.2f} Fixed Return interest credited to your "
+                        f"${float(interest):,.2f} AI-POWERED STAKING PROGRAM interest credited to your "
                         f"main wallet. You can withdraw it any time. Next cycle: {next_iso}."
                     ),
                     type="fixed_return_interest",
@@ -982,7 +1306,7 @@ async def accrue_due_payouts(db: AsyncSession) -> int:
                 logger.warning("FR interest notification failed: %s", _ne)
             paid += 1
         except Exception as exc:
-            logger.error("Fixed Return payout failed for lock %s: %s", lock.id, exc)
+            logger.error("AI-POWERED STAKING PROGRAM payout failed for lock %s: %s", lock.id, exc)
 
     if paid:
         await db.commit()
@@ -1012,18 +1336,10 @@ def _serialize_lock(r: FixedReturnLock) -> dict:
     # if no payout has fired yet), so the figure resets cleanly to 0
     # the moment a cycle credits.
     now = datetime.now(timezone.utc)
-    anchor = None
-    if r.payouts_count and r.next_payout_at:
-        # last_credit ≈ next_payout - cycle_months
-        nxt = r.next_payout_at
-        if nxt.tzinfo is None:
-            nxt = nxt.replace(tzinfo=timezone.utc)
-        cycle_months = _tenure_to_months(int(r.tenure_days or 0))
-        anchor = _add_months(nxt, -cycle_months)
-    if anchor is None:
-        anchor = r.locked_at
-        if anchor and anchor.tzinfo is None:
-            anchor = anchor.replace(tzinfo=timezone.utc)
+    # Accrual floor: later of the scheduled anchor and last_interest_at (set
+    # by an on-demand interest withdrawal) so the accrued figure resets to 0
+    # right after the user pulls interest out.
+    anchor = _accrual_anchor(r)
     # Count WHOLE CALENDAR DAYS in IST (UTC+5:30), not rolling 24h periods, so
     # the displayed accrued interest ticks up at local 12:00 AM each day rather
     # than at the lock's time-of-day (client 2026-06-30: "jo interest show ho

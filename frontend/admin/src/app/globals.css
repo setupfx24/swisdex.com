@@ -91,7 +91,7 @@ html, body {
 /* ── Inputs ──
    Bumped to 14px + weight 500 + tabular-nums so the value the admin
    typed actually stands out from the input chrome. Numeric admin tables
-   (IB tiers, Fixed Return matrix, charges, spreads) read as data, not
+   (IB tiers, AI-POWERED STAKING PROGRAM matrix, charges, spreads) read as data, not
    placeholder text. */
 input, select, textarea {
   background-color: rgb(var(--c-bg-input) / 1);

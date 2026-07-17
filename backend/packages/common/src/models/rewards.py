@@ -121,3 +121,51 @@ class LifestyleFulfillment(Base):
     delivered_at = Column(DateTime(timezone=True), nullable=True)
     cancelled_at = Column(DateTime(timezone=True), nullable=True)
     handled_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+
+
+# ─── Referral staking reward campaigns (client 2026-07-11) ───────────────
+# Admin-run, time-bound offers: "bring NEW referred users who lock AI Powered
+# Staking during the window; earn a tiered % of the volume they lock."
+# Separate from the XP/AC/PS engine above — pays real USD to the main wallet.
+
+class RewardCampaign(Base):
+    """One admin offer: a date window + tiered %-of-volume payouts."""
+    __tablename__ = "reward_campaigns"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    title = Column(String(120), nullable=False)
+    description = Column(Text, nullable=True)
+    starts_at = Column(DateTime(timezone=True), nullable=False)
+    ends_at = Column(DateTime(timezone=True), nullable=False)
+    is_active = Column(Boolean, nullable=False, default=True, server_default="true")
+    created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+
+
+class RewardCampaignTier(Base):
+    """Volume bracket → reward. The referrer's TOTAL qualifying volume picks
+    ONE bracket (min <= total < max; max NULL = open-ended). The reward is
+    EITHER a percent of the whole total (reward_pct) OR a fixed USD amount
+    (reward_amount) — exactly one is set (client 2026-07-13)."""
+    __tablename__ = "reward_campaign_tiers"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    campaign_id = Column(UUID(as_uuid=True), ForeignKey("reward_campaigns.id", ondelete="CASCADE"), nullable=False)
+    min_amount = Column(Numeric(18, 2), nullable=False)
+    max_amount = Column(Numeric(18, 2), nullable=True)   # NULL = no upper bound
+    reward_pct = Column(Numeric(6, 3), nullable=True)    # % of the whole volume
+    reward_amount = Column(Numeric(18, 2), nullable=True)  # fixed USD payout
+
+
+class RewardCampaignClaim(Base):
+    """One claim per (campaign, referrer). Snapshot of the qualifying volume
+    and the USD paid to the main wallet at claim time."""
+    __tablename__ = "reward_campaign_claims"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    campaign_id = Column(UUID(as_uuid=True), ForeignKey("reward_campaigns.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    staked_total = Column(Numeric(18, 2), nullable=False)
+    reward_pct = Column(Numeric(6, 3), nullable=True)   # NULL when the tier paid a fixed amount
+    reward_amount = Column(Numeric(18, 2), nullable=False)
+    claimed_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)

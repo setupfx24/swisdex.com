@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { clsx } from 'clsx';
 import toast from 'react-hot-toast';
-import { Loader2, Lock, AlertTriangle, CheckCircle2, Clock, Calendar } from 'lucide-react';
+import { Loader2, Lock, AlertTriangle, CheckCircle2, Clock, Calendar, ChevronsUp } from 'lucide-react';
 
 import DashboardShell from '@/components/layout/DashboardShell';
 import Modal from '@/components/ui/Modal';
@@ -17,6 +17,19 @@ interface RateConfig {
   rate_matrix_pct: number[][];
   early_withdrawal_fee_pct: number;
   lock_months: number;
+  // Interest-payout window (admin-set, default 25–30): "Withdraw interest"
+  // only works on these days of the month. The open flag is computed
+  // server-side (UTC) so it always matches the API's own gate.
+  payout_day_start: number;
+  payout_day_end: number;
+  payout_window_open: boolean;
+  // Standard (post-launch) ladder, always present; equals rate_matrix_pct
+  // unless a pre-launch offer (below) or personal override is active.
+  base_rate_matrix_pct?: number[][];
+  // Pre-launch offer (client 2026-07-14): when enabled, rate_matrix_pct above
+  // IS this matrix (what users see is what they get); the standard sheet is
+  // shown for comparison behind a toggle.
+  prelaunch?: { enabled: boolean; headline: string; rate_matrix_pct: number[][] } | null;
 }
 
 interface LockRow {
@@ -32,7 +45,7 @@ interface LockRow {
   next_payout_at: string | null;
   settled_at: string | null;
   early_requested_at: string | null;
-  state: 'active' | 'early_pending' | 'matured' | 'withdrawn_early';
+  state: 'active' | 'early_pending' | 'principal_pending' | 'matured' | 'withdrawn_early';
   payouts_count: number;
   total_interest_paid: number;
   // Pro-rata interest since the last cycle credit (or lock open if no
@@ -67,6 +80,15 @@ export default function FixedReturnPage() {
   const [withdrawing, setWithdrawing] = useState<string | null>(null);
   const [amount, setAmount] = useState<string>('1000');
   const [tenureLabel, setTenureLabel] = useState<string>('');
+  // Plan upgrade (client 2026-07-11): opens a modal with higher tenures,
+  // top-up cost, and the elapsed interest that will be credited.
+  const [upgradeFor, setUpgradeFor] = useState<LockRow | null>(null);
+  const [upgradeOpts, setUpgradeOpts] = useState<any | null>(null);
+  const [upgradePick, setUpgradePick] = useState<string>('');
+  const [upgrading, setUpgrading] = useState(false);
+  // Pre-launch sheet toggle (client 2026-07-14): 'live' = the pre-launch
+  // rates currently in force, 'standard' = the post-launch ladder preview.
+  const [sheetView, setSheetView] = useState<'live' | 'standard'>('live');
   // Custom in-app confirmation dialog (replaces native window.confirm).
   const [confirmDialog, setConfirmDialog] = useState<{
     title: string;
@@ -87,7 +109,7 @@ export default function FixedReturnPage() {
       setLocks(l || []);
       if (!tenureLabel && c.tenures.length > 0) setTenureLabel(c.tenures[0].label);
     } catch (e: any) {
-      toast.error(e?.message || 'Failed to load AI Powered Staking Program');
+      toast.error(e?.message || 'Failed to load AI-POWERED STAKING PROGRAM');
     } finally {
       setLoading(false);
     }
@@ -203,12 +225,12 @@ export default function FixedReturnPage() {
     const now = Date.now();
     const matured = !!(l.matures_at && new Date(l.matures_at).getTime() <= now);
     const message = matured
-      ? `You'll receive your principal of ${fmtUsd(l.principal)} back. Interest (${fmtUsd(l.total_interest_paid)} so far) was already paid in cycles.`
+      ? `Request to withdraw your principal of ${fmtUsd(l.principal)}. The request goes to admin for approval — the principal is credited to your wallet once approved. Interest (${fmtUsd(l.total_interest_paid)} so far) was already paid in cycles.`
       : `Early withdrawal request:\n• ${cfg.early_withdrawal_fee_pct}% penalty on principal\n• ALL interest paid to date (${fmtUsd(l.total_interest_paid)}) claws back\n\nThe request goes to admin for approval — funds are NOT credited until approved. Projected return after approval: ${fmtUsd(Math.max(0, l.principal * (1 - cfg.early_withdrawal_fee_pct / 100) - l.total_interest_paid))}.`;
     setConfirmDialog({
-      title: matured ? 'Claim your principal' : 'Request early withdrawal',
+      title: matured ? 'Withdraw principal' : 'Request early withdrawal',
       message,
-      confirmLabel: matured ? 'Claim principal' : 'Submit request',
+      confirmLabel: matured ? 'Submit request' : 'Submit request',
       danger: !matured,
       onConfirm: () => doWithdraw(l, matured),
     });
@@ -220,7 +242,7 @@ export default function FixedReturnPage() {
       await api.post(`/fixed-return/locks/${l.id}/withdraw`, {});
       toast.success(
         matured
-          ? 'Principal returned'
+          ? 'Principal-withdrawal request submitted — awaiting admin approval'
           : 'Early-withdrawal request submitted — awaiting admin approval',
       );
       await load();
@@ -228,6 +250,53 @@ export default function FixedReturnPage() {
       toast.error(e?.message || 'Withdrawal failed');
     } finally {
       setWithdrawing(null);
+    }
+  };
+
+  const openUpgrade = async (l: LockRow) => {
+    setUpgradeFor(l);
+    setUpgradeOpts(null);
+    setUpgradePick('');
+    try {
+      const o = await api.get<any>(`/fixed-return/locks/${l.id}/upgrade-options`);
+      setUpgradeOpts(o);
+      if (o?.options?.length) setUpgradePick(o.options[0].tenure_label);
+    } catch (e: any) {
+      toast.error(e?.message || 'Could not load upgrade options');
+      setUpgradeFor(null);
+    }
+  };
+
+  const [withdrawingInterest, setWithdrawingInterest] = useState<string | null>(null);
+  const withdrawInterest = async (l: LockRow) => {
+    setWithdrawingInterest(l.id);
+    try {
+      const r = await api.post<{ interest_withdrawn: number }>(`/fixed-return/locks/${l.id}/withdraw-interest`, {});
+      toast.success(`${fmtUsd(r.interest_withdrawn)} interest credited to your wallet.`);
+      await load();
+    } catch (e: any) {
+      toast.error(e?.message || 'Interest withdrawal failed');
+    } finally {
+      setWithdrawingInterest(null);
+    }
+  };
+
+  const doUpgrade = async () => {
+    if (!upgradeFor || !upgradePick) return;
+    setUpgrading(true);
+    try {
+      const r = await api.post<any>(`/fixed-return/locks/${upgradeFor.id}/upgrade`, {
+        new_tenure_label: upgradePick,
+      });
+      toast.success(
+        `Upgraded to ${upgradePick}! ${r.elapsed_interest_credited > 0 ? fmtUsd(r.elapsed_interest_credited) + ' interest credited. ' : ''}New principal ${fmtUsd(r.new_lock.principal)}.`,
+      );
+      setUpgradeFor(null);
+      await load();
+    } catch (e: any) {
+      toast.error(e?.message || 'Upgrade failed');
+    } finally {
+      setUpgrading(false);
     }
   };
 
@@ -241,11 +310,24 @@ export default function FixedReturnPage() {
     );
   }
 
+  // Server-computed flag (UTC) — falls back to open if an older backend
+  // doesn't send it yet; the API enforces the window regardless.
+  const payoutWindowOpen = cfg.payout_window_open !== false;
+
+  const prelaunchOn = !!cfg.prelaunch?.enabled;
+  // Which sheet the table shows: the live (pre-launch) rates or the standard
+  // post-launch ladder for comparison. Locks are ALWAYS priced off
+  // cfg.rate_matrix_pct — the standard view is informational only.
+  const showStandardSheet = prelaunchOn && sheetView === 'standard';
+  const displayMatrix = showStandardSheet
+    ? (cfg.base_rate_matrix_pct ?? cfg.rate_matrix_pct)
+    : cfg.rate_matrix_pct;
+
   return (
     <DashboardShell>
       <div className="px-4 sm:px-6 py-6 space-y-6 max-w-[1200px] mx-auto">
         <header>
-          <h1 className="text-2xl font-bold text-text-primary">AI Powered Staking Program</h1>
+          <h1 className="text-2xl font-bold text-text-primary">AI-POWERED STAKING PROGRAM </h1>
           <p className="mt-1 text-sm text-text-secondary max-w-2xl">
             Lock your principal for{' '}
             <strong className="text-text-primary">{cfg.lock_months} months</strong>.
@@ -253,6 +335,39 @@ export default function FixedReturnPage() {
             principal back at maturity.
           </p>
         </header>
+
+        {/* Pre-launch offer switch (client 2026-07-14): while the offer runs,
+            the pre-launch sheet IS the live rate; the standard ladder stays
+            viewable for comparison. */}
+        {prelaunchOn && (
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={() => setSheetView('live')}
+              className={clsx(
+                'inline-flex items-center gap-1.5 px-4 py-1.5 rounded-full text-xs font-bold transition-fast border',
+                sheetView === 'live'
+                  ? 'bg-accent text-white border-accent'
+                  : 'border-border-primary text-text-secondary hover:bg-bg-hover',
+              )}
+            >
+              🚀 Pre launch
+            </button>
+            <button
+              onClick={() => setSheetView('standard')}
+              className={clsx(
+                'inline-flex items-center gap-1.5 px-4 py-1.5 rounded-full text-xs font-semibold transition-fast border',
+                sheetView === 'standard'
+                  ? 'bg-bg-hover text-text-primary border-border-primary'
+                  : 'border-border-primary text-text-tertiary hover:bg-bg-hover',
+              )}
+            >
+              Standard rates
+            </button>
+            <span className="text-[11px] font-semibold text-accent">
+              {cfg.prelaunch?.headline}
+            </span>
+          </div>
+        )}
 
         {/* Rate matrix */}
         <section className="rounded-xl border border-border-primary bg-bg-secondary overflow-x-auto">
@@ -290,7 +405,7 @@ export default function FixedReturnPage() {
                     <div className="text-[10px] font-normal text-text-tertiary mt-0.5">every {tn.days} days</div>
                   </th>
                   {cfg.tiers.map((_, ci) => {
-                    const highlight = ti === tenureIdx && ci === tierIdx;
+                    const highlight = !showStandardSheet && ti === tenureIdx && ci === tierIdx;
                     return (
                       <td
                         key={ci}
@@ -301,7 +416,7 @@ export default function FixedReturnPage() {
                             : 'text-text-secondary',
                         )}
                       >
-                        {(cfg.rate_matrix_pct[ti]?.[ci] ?? 0).toFixed(2)}%
+                        {(displayMatrix[ti]?.[ci] ?? 0).toFixed(2)}%
                       </td>
                     );
                   })}
@@ -310,7 +425,9 @@ export default function FixedReturnPage() {
             </tbody>
           </table>
           <p className="text-[11px] text-text-tertiary px-4 py-2">
-            Each cell is the % paid <strong>per cycle</strong>. Your lock runs for {cfg.lock_months} months total.
+            {showStandardSheet
+              ? 'Standard rates — these apply after the pre-launch offer ends. New locks today get the Pre launch rates.'
+              : <>Each cell is the % paid <strong>per cycle</strong>. Your lock runs for {cfg.lock_months} months total.</>}
           </p>
         </section>
 
@@ -410,7 +527,8 @@ export default function FixedReturnPage() {
                 const now = new Date();
                 const matured = l.matures_at && new Date(l.matures_at) <= now;
                 const isActive = l.state === 'active';
-                const isPending = l.state === 'early_pending';
+                const isPending = l.state === 'early_pending' || l.state === 'principal_pending';
+                const isPrincipalPending = l.state === 'principal_pending';
                 return (
                   <div
                     key={l.id}
@@ -488,15 +606,51 @@ export default function FixedReturnPage() {
                       </div>
                     </div>
 
+                    {/* Start date + per-day / per-month interest + payouts taken.
+                        rate_pct is a PER-MONTH %, so month = principal×rate%,
+                        day = month/30. (client 2026-07-11) */}
+                    {(() => {
+                      const perMonth = l.principal * (l.rate_pct / 100);
+                      const perDay = perMonth / 30;
+                      return (
+                        <div className="flex flex-wrap gap-x-6 gap-y-1.5 pt-2 border-t border-border-primary/40 text-[11px]">
+                          <div>
+                            <span className="text-text-tertiary">Started: </span>
+                            <span className="text-text-primary font-medium">{fmtDate(l.locked_at)}</span>
+                          </div>
+                          <div>
+                            <span className="text-text-tertiary">Interest / day: </span>
+                            <span className="text-buy font-mono font-medium">{fmtUsd(perDay)}</span>
+                          </div>
+                          <div>
+                            <span className="text-text-tertiary">Interest / month: </span>
+                            <span className="text-buy font-mono font-medium">{fmtUsd(perMonth)}</span>
+                          </div>
+                          <div>
+                            <span className="text-text-tertiary">Payouts received: </span>
+                            <span className="text-text-primary font-medium">
+                              {l.payouts_count} time{l.payouts_count === 1 ? '' : 's'} ({fmtUsd(l.total_interest_paid)})
+                            </span>
+                          </div>
+                          <div>
+                            <span className="text-text-tertiary">Current interest (not yet paid): </span>
+                            <span className="text-amber-400 font-mono font-medium">{fmtUsd(l.accrued_since_last_payout)}</span>
+                          </div>
+                        </div>
+                      );
+                    })()}
+
                     {/* Pending-approval banner — moved out of the action row so
                         it never overlaps the status pill on narrow widths. */}
                     {isPending && (
                       <div className="rounded-md border border-amber-400/40 bg-amber-500/5 px-3 py-2 text-[11px] text-amber-300 flex items-start gap-2">
                         <AlertTriangle size={12} className="mt-0.5 shrink-0" />
                         <span>
-                          Early-withdrawal request submitted
+                          {isPrincipalPending ? 'Principal-withdrawal request submitted' : 'Early-withdrawal request submitted'}
                           {l.early_requested_at ? ` on ${fmtDate(l.early_requested_at)}` : ''}.
-                          Funds stay locked until an admin approves; interest pauses meanwhile.
+                          {isPrincipalPending
+                            ? ' Your principal will be credited to your wallet once an admin approves.'
+                            : ' Funds stay locked until an admin approves; interest pauses meanwhile.'}
                         </span>
                       </div>
                     )}
@@ -505,6 +659,37 @@ export default function FixedReturnPage() {
                         button never sits beside dense text. */}
                     {(isActive || isPending) && (
                       <div className="flex flex-wrap items-center justify-end gap-2 pt-1 border-t border-border-primary/40">
+                        {isActive && !matured && (
+                          <button
+                            onClick={() => openUpgrade(l)}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-fast border border-buy/40 text-buy hover:bg-buy/10"
+                          >
+                            <ChevronsUp size={13} /> Upgrade plan
+                          </button>
+                        )}
+                        {/* Withdraw interest — direct to wallet, no approval.
+                            Shown when there is accrued interest to pull, but only
+                            clickable inside the admin payout window (default day
+                            25–30 of each month); outside it the button is greyed
+                            out and the backend refuses anyway. */}
+                        {isActive && l.accrued_since_last_payout > 0 && (
+                          <div className="flex flex-col items-end gap-0.5">
+                            <button
+                              onClick={() => void withdrawInterest(l)}
+                              disabled={withdrawingInterest === l.id || !payoutWindowOpen}
+                              title={payoutWindowOpen ? undefined : `Available only from day ${cfg.payout_day_start} to ${cfg.payout_day_end} of each month`}
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-fast border border-buy/40 text-buy hover:bg-buy/10 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+                            >
+                              {withdrawingInterest === l.id && <Loader2 size={11} className="animate-spin" />}
+                              Withdraw interest ({fmtUsd(l.accrued_since_last_payout)})
+                            </button>
+                            {!payoutWindowOpen && (
+                              <span className="text-[10px] text-text-tertiary">
+                                Available {cfg.payout_day_start}–{cfg.payout_day_end} of every month
+                              </span>
+                            )}
+                          </div>
+                        )}
                         {isActive && (
                           <button
                             onClick={() => withdraw(l)}
@@ -517,7 +702,7 @@ export default function FixedReturnPage() {
                             )}
                           >
                             {withdrawing === l.id && <Loader2 size={11} className="animate-spin" />}
-                            {matured ? 'Claim principal' : 'Request early withdrawal'}
+                            {matured ? 'Withdraw principal' : 'Request early withdrawal'}
                           </button>
                         )}
                       </div>
@@ -562,6 +747,92 @@ export default function FixedReturnPage() {
                 {confirmDialog.confirmLabel}
               </button>
             </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* Upgrade plan modal */}
+      <Modal
+        open={!!upgradeFor}
+        onClose={() => setUpgradeFor(null)}
+        title="Upgrade your plan"
+        width="sm"
+      >
+        {upgradeFor && (
+          <div className="space-y-4">
+            {!upgradeOpts ? (
+              <div className="flex justify-center py-8"><Loader2 className="animate-spin text-text-tertiary" /></div>
+            ) : !upgradeOpts.can_upgrade ? (
+              <p className="text-sm text-text-secondary">
+                This is already the highest plan — nothing higher to upgrade to.
+              </p>
+            ) : (
+              <>
+                <p className="text-sm text-text-secondary leading-relaxed">
+                  Move from <strong className="text-text-primary">{upgradeFor.tenure_label}</strong> to a
+                  higher plan. Your elapsed interest is credited to your wallet, a top-up is debited, and a
+                  new bigger plan starts.
+                </p>
+
+                {/* Choose new plan */}
+                <div>
+                  <label className="block text-xs font-medium text-text-secondary mb-1.5">New plan</label>
+                  <div className="flex flex-wrap gap-1.5">
+                    {upgradeOpts.options.map((o: any) => (
+                      <button
+                        key={o.tenure_label}
+                        onClick={() => setUpgradePick(o.tenure_label)}
+                        className={clsx(
+                          'px-3 py-1.5 rounded-md text-xs font-semibold border transition-fast',
+                          upgradePick === o.tenure_label
+                            ? 'bg-accent/15 text-accent border-accent/50'
+                            : 'border-border-primary text-text-secondary hover:bg-bg-hover',
+                        )}
+                      >
+                        {o.tenure_label} · {o.new_rate_pct}%/mo
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Breakdown */}
+                <div className="rounded-lg border border-border-primary bg-bg-base p-3 space-y-1.5 text-xs">
+                  <div className="flex justify-between">
+                    <span className="text-text-tertiary">Elapsed interest → wallet</span>
+                    <span className="font-mono font-semibold text-buy">+{fmtUsd(upgradeOpts.elapsed_interest)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-text-tertiary">Top-up debited ({upgradeOpts.topup_pct}% of {fmtUsd(upgradeOpts.current_principal)})</span>
+                    <span className="font-mono font-semibold text-red-400">−{fmtUsd(upgradeOpts.topup_amount)}</span>
+                  </div>
+                  <div className="flex justify-between border-t border-border-primary/50 pt-1.5">
+                    <span className="text-text-secondary font-medium">New principal</span>
+                    <span className="font-mono font-bold text-text-primary">{fmtUsd(upgradeOpts.new_principal)}</span>
+                  </div>
+                </div>
+                <p className="text-[11px] text-text-tertiary">
+                  The {fmtUsd(upgradeOpts.topup_amount)} top-up is auto-debited from your main wallet.
+                  Make sure you have enough balance.
+                </p>
+
+                <div className="flex justify-end gap-2">
+                  <button
+                    onClick={() => setUpgradeFor(null)}
+                    className="px-4 py-2 text-sm font-medium rounded-md border border-border-primary text-text-secondary hover:bg-bg-hover transition-fast"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => void doUpgrade()}
+                    disabled={upgrading || !upgradePick}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-semibold rounded-md text-white bg-accent hover:bg-accent/90 transition-fast disabled:opacity-50"
+                  >
+                    {upgrading && <Loader2 size={13} className="animate-spin" />}
+                    Upgrade to {upgradePick || '…'}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         )}
       </Modal>

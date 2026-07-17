@@ -109,6 +109,7 @@ async def notifications_summary(
     # deposit/lock comes in (informational). Own savepoint so a missing table
     # can't poison the session.
     fr_withdrawals = 0
+    fr_principal = 0
     fr_new_locks = 0
     try:
         async with db.begin_nested():
@@ -116,12 +117,18 @@ async def notifications_summary(
                 text("SELECT COUNT(*) FROM fixed_return_locks WHERE state = 'early_pending'")
             )
             fr_withdrawals = int(fr_w_q.scalar() or 0)
+            # Matured principal-withdrawal claims awaiting approval (2026-07-11).
+            fr_p_q = await db.execute(
+                text("SELECT COUNT(*) FROM fixed_return_locks WHERE state = 'principal_pending'")
+            )
+            fr_principal = int(fr_p_q.scalar() or 0)
             fr_n_q = await db.execute(
                 text("SELECT COUNT(*) FROM fixed_return_locks WHERE locked_at >= :since"),
                 {"since": since_24h},
             )
             fr_new_locks = int(fr_n_q.scalar() or 0)
     except Exception:
+        fr_principal = 0
         fr_withdrawals = 0
         fr_new_locks = 0
 
@@ -185,6 +192,8 @@ async def notifications_summary(
          "label": "New RM withdrawal requests", "link": "/rm-manual-requests", "severity": "critical"},
         {"kind": "fixed_return_withdrawals", "count": fr_withdrawals, "perm": "fixed_return.view",
          "label": "Fixed-Return withdrawal requests", "link": "/config/fixed-return", "severity": "critical"},
+        {"kind": "fixed_return_principal", "count": fr_principal, "perm": "fixed_return.view",
+         "label": "AI Staking principal-withdrawal requests", "link": "/config/fixed-return", "severity": "critical"},
         {"kind": "deposits",    "count": pending_deposits, "perm": "deposits.view",
          "label": "Pending deposits", "link": "/deposits", "severity": "normal"},
         {"kind": "fixed_return_new", "count": fr_new_locks, "perm": "fixed_return.view",

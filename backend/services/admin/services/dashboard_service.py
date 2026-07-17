@@ -23,9 +23,11 @@ async def get_dashboard_stats(db: AsyncSession) -> DashboardStats:
         select(func.count(User.id)).where(
             User.role.notin_(["admin", "super_admin"]),
             User.is_demo == False,  # noqa: E712 — SQLAlchemy needs `==`, not `is`
+            User.is_promotional.isnot(True),  # hide promotional demo accounts
         )
     )
     total_users = total_users_q.scalar() or 0
+    promo_ids = select(User.id).where(User.is_promotional == True)  # noqa: E712
 
     # Active Traders: distinct users who traded in the last 30 days
     # (opened a position OR closed a trade). Broader than "has open position now".
@@ -37,14 +39,14 @@ async def get_dashboard_stats(db: AsyncSession) -> DashboardStats:
         select(TradingAccount.user_id)
         .select_from(Position)
         .join(TradingAccount, TradingAccount.id == Position.account_id)
-        .where(Position.created_at >= thirty_days_ago)
+        .where(Position.created_at >= thirty_days_ago, TradingAccount.is_promotional.isnot(True))
     )
     # Users with trades closed in last 30 days
     closed_users_q = (
         select(TradingAccount.user_id)
         .select_from(TradeHistory)
         .join(TradingAccount, TradingAccount.id == TradeHistory.account_id)
-        .where(TradeHistory.closed_at >= thirty_days_ago)
+        .where(TradeHistory.closed_at >= thirty_days_ago, TradingAccount.is_promotional.isnot(True))
     )
     combined = open_users_q.union(closed_users_q).subquery()
     active_traders_q = await db.execute(
@@ -57,6 +59,7 @@ async def get_dashboard_stats(db: AsyncSession) -> DashboardStats:
         select(func.coalesce(func.sum(Deposit.amount), 0)).where(
             Deposit.status.in_(["approved", "auto_approved"]),
             Deposit.created_at >= today_start,
+            Deposit.user_id.notin_(promo_ids),
         )
     )
     deposits_today = float(deposits_today_q.scalar() or 0)
@@ -66,15 +69,21 @@ async def get_dashboard_stats(db: AsyncSession) -> DashboardStats:
         select(func.coalesce(func.sum(Withdrawal.amount), 0)).where(
             Withdrawal.status.in_(["approved", "completed"]),
             Withdrawal.created_at >= today_start,
+            Withdrawal.user_id.notin_(promo_ids),
         )
     )
     withdrawals_today = float(withdrawals_today_q.scalar() or 0)
 
     # Platform P&L (all-time): broker wins when traders lose → negate total user profit.
-    # Also add commissions earned (always positive for broker).
+    # Also add commissions earned (always positive for broker). Promotional demo
+    # accounts are excluded so their showcase trades don't move real P&L.
     pnl_q = await db.execute(
-        select(func.coalesce(func.sum(Position.profit), 0)).where(
+        select(func.coalesce(func.sum(Position.profit), 0))
+        .select_from(Position)
+        .join(TradingAccount, TradingAccount.id == Position.account_id)
+        .where(
             Position.status == PositionStatus.CLOSED.value,
+            TradingAccount.is_promotional.isnot(True),
         )
     )
     user_pnl = float(pnl_q.scalar() or 0)
@@ -99,7 +108,9 @@ async def get_dashboard_stats(db: AsyncSession) -> DashboardStats:
 
     # Pending Deposits count.
     pending_deposits_q = await db.execute(
-        select(func.count(Deposit.id)).where(Deposit.status == "pending")
+        select(func.count(Deposit.id)).where(
+            Deposit.status == "pending", Deposit.user_id.notin_(promo_ids),
+        )
     )
     pending_deposits_count = pending_deposits_q.scalar() or 0
 
@@ -127,6 +138,7 @@ async def dashboard_revenue_series(days: int, db: AsyncSession) -> DashboardReve
     end_d: date = datetime.utcnow().date()
     start_d: date = end_d - timedelta(days=days - 1)
     cutoff = datetime.combine(start_d, datetime.min.time())
+    promo_ids = select(User.id).where(User.is_promotional == True)  # noqa: E712
 
     day_bucket = func.date_trunc("day", Deposit.created_at)
     dep_rows = (
@@ -135,6 +147,7 @@ async def dashboard_revenue_series(days: int, db: AsyncSession) -> DashboardReve
             .where(
                 Deposit.status.in_(["approved", "auto_approved"]),
                 Deposit.created_at >= cutoff,
+                Deposit.user_id.notin_(promo_ids),
             )
             .group_by(day_bucket)
             .order_by(day_bucket)
@@ -148,6 +161,7 @@ async def dashboard_revenue_series(days: int, db: AsyncSession) -> DashboardReve
             .where(
                 Withdrawal.status.in_(["approved", "completed"]),
                 Withdrawal.created_at >= cutoff,
+                Withdrawal.user_id.notin_(promo_ids),
             )
             .group_by(w_bucket)
             .order_by(w_bucket)

@@ -49,6 +49,23 @@ SERVER_SILENCE_THRESHOLD = 60.0    # server disconnects at 60s
 RECONNECT_BACKOFF_BASE = 2.0
 RECONNECT_BACKOFF_MAX = 60.0
 
+# --- Zombie-socket / zombie-subscription guard -------------------------------
+# Incident 2026-07-13: XAUUSD produced no candles from the Sunday market open
+# (22:00 UTC) until ~00:00 UTC while the WS stayed "connected" — protocol pings
+# keep a dead SUBSCRIPTION looking healthy, so nothing ever reconnected. If no
+# DATA frame (trade/depth push) arrives for this long, we force-close the
+# socket so the reconnect loop resubscribes fresh. Over the weekend this cycles
+# harmlessly (~every 16 min); the payoff is the subscription is never older
+# than this window when the market reopens.
+SILENT_RECONNECT_SEC = 900.0       # 15 min without a data frame → resubscribe
+# On reconnect, heal the blind window from InfoWay's own history — clamped so a
+# weekend's silence doesn't turn into a giant fetch (bars outside the window
+# simply don't exist and merge to nothing). 1m/5m only: higher TFs are healed
+# by the reconcile loop (RECONCILE_COUNT covers ≥90 min for 15m+).
+BACKFILL_CLAMP_SEC = 6 * 3600.0
+BACKFILL_TFS = ("1m", "5m")
+BACKFILL_SPACING_SEC = 1.0         # keep reconnect backfill under the 60/min cap
+
 # --- Live → official candle reconciliation ----------------------------------
 # Our tick-aggregated candles APPROXIMATE InfoWay's official OHLC but aren't
 # byte-identical (we de-spike + sample only the ticks we receive). That left a
@@ -349,30 +366,60 @@ class InfoWayFeed:
                 logger.debug("InfoWay heartbeat send failed: %s", exc)
                 return
 
+    async def _silence_monitor(self, ws, conn_idx: int) -> None:
+        """Force-reconnect guard (incident 2026-07-13, missing Sunday-open
+        candles): a subscription can go zombie while TCP + protocol pings stay
+        healthy, so the reconnect loop never fires and the market reopens into
+        a socket that pushes nothing. If no DATA frame lands for
+        SILENT_RECONNECT_SEC, close the socket — _run_socket reconnects,
+        resubscribes fresh, and backfills the blind window."""
+        while self._running:
+            try:
+                await asyncio.sleep(60.0)
+            except asyncio.CancelledError:
+                return
+            last = self._last_msg_ts
+            if last <= 0:
+                continue  # not armed until the first-ever data frame
+            silent = time.time() - last
+            if silent > SILENT_RECONNECT_SEC:
+                logger.warning(
+                    "InfoWay [conn-%d] no data frames in %.0fs — forcing a "
+                    "reconnect/resubscribe (zombie-subscription guard)",
+                    conn_idx, silent,
+                )
+                with contextlib.suppress(Exception):
+                    await ws.close()
+                return
+
     async def _backfill_gap(self, conn_idx: int, codes: List[str], since_ts: float) -> None:
-        """Fill bars:{sym}:{tf} for the disconnect window [since_ts, now] from
-        InfoWay's OWN history. Per-symbol fetch (a multi-symbol batch returns
-        only 2 bars — useless for a gap), merged by time, never replacing other
-        bars. Best-effort: a failed fetch leaves an honest gap, never blocks the
-        reconnect."""
+        """Fill bars:{sym}:{tf} for the blind window [since_ts, now] from
+        InfoWay's OWN history. The caller clamps since_ts to BACKFILL_CLAMP_SEC,
+        so a weekend of legitimate silence never explodes into a giant fetch —
+        klines for closed-market hours simply don't exist and merge to nothing.
+        Per-symbol fetch (a multi-symbol batch returns only 2 bars — useless for
+        a gap), merged by time, never replacing other bars. Best-effort and
+        spaced to respect the free plan's 60/min REST cap; runs as a background
+        task so live frames flow while history heals."""
         from packages.common.src.infoway_rest import fetch_klines
         from .bar_aggregator import TIMEFRAMES
 
         now = time.time()
         gap_sec = now - since_ts
-        # Skip trivial gaps (≤ ~1 bar) and absurd ones (> 24h = cold restart, not
-        # a live-session drop — leave that to normal seeding).
-        if gap_sec < 90 or gap_sec > 86400:
+        if gap_sec < 90:  # ≤ ~1 bar — nothing worth fetching
             return
         logger.warning(
-            "InfoWay [conn-%d] disconnect window ~%.0fs — backfilling %d symbol(s) from history",
+            "InfoWay [conn-%d] blind window ~%.0fs — backfilling %d symbol(s) from history",
             conn_idx, gap_sec, len(codes),
         )
         for code in codes:
             plat = _platform_code_for(code, self._instruments)
             if not plat:
                 continue
-            for tf_name, tf_sec in TIMEFRAMES.items():
+            for tf_name in BACKFILL_TFS:
+                tf_sec = TIMEFRAMES.get(tf_name)
+                if not tf_sec:
+                    continue
                 need = int(gap_sec // tf_sec) + 3  # cover the gap + small overlap
                 if need < 1:
                     continue
@@ -380,12 +427,17 @@ class InfoWayFeed:
                     plat, tf_name, count=min(need, 500),
                     end_ts=int(now), token=self._token,
                 )
-                if not bars:
-                    continue
-                lo = int(since_ts) - tf_sec  # one bar of overlap before the gap
-                bars = [b for b in bars if b["time"] >= lo]
                 if bars:
-                    await self._merge_bars(plat, tf_name, tf_sec, bars)
+                    lo = int(since_ts) - tf_sec  # one bar of overlap before the gap
+                    bars = [b for b in bars if b["time"] >= lo]
+                    if bars:
+                        await self._merge_bars(plat, tf_name, tf_sec, bars)
+                if not self._running:
+                    return
+                try:
+                    await asyncio.sleep(BACKFILL_SPACING_SEC)
+                except asyncio.CancelledError:
+                    return
 
     async def _merge_bars(
         self, symbol: str, tf_name: str, tf_sec: int, new_bars: List[dict],
@@ -487,6 +539,7 @@ class InfoWayFeed:
 
         while self._running:
             hb_task: Optional[asyncio.Task] = None
+            mon_task: Optional[asyncio.Task] = None
             try:
                 logger.info("InfoWay [conn-%d] connecting…", conn_idx)
                 async with websockets.connect(
@@ -510,16 +563,26 @@ class InfoWayFeed:
                     )
                     backoff = RECONNECT_BACKOFF_BASE
 
-                    # Backfill the window we were disconnected for from InfoWay's
-                    # OWN history (same source → no price-basis seam) BEFORE
-                    # resuming live, so the chart has no gap/jump. Skips the very
-                    # first connect (_last_msg_ts == 0) and clamps the gap.
+                    # Backfill the window we were blind for from InfoWay's OWN
+                    # history (same source → no price-basis seam). Clamped to
+                    # BACKFILL_CLAMP_SEC so a weekend's silence stays cheap, and
+                    # run in the background so live frames flow immediately.
+                    # Skips the very first connect (_last_msg_ts == 0) — cold
+                    # start is normal seeding's job.
                     if self._last_msg_ts > 0:
-                        await self._backfill_gap(conn_idx, codes, self._last_msg_ts)
+                        since = max(self._last_msg_ts, time.time() - BACKFILL_CLAMP_SEC)
+                        asyncio.create_task(
+                            self._backfill_gap(conn_idx, codes, since),
+                            name=f"infoway-backfill-{conn_idx}",
+                        )
 
                     hb_task = asyncio.create_task(
                         self._heartbeat_loop(ws),
                         name=f"infoway-hb-{conn_idx}",
+                    )
+                    mon_task = asyncio.create_task(
+                        self._silence_monitor(ws, conn_idx),
+                        name=f"infoway-mon-{conn_idx}",
                     )
 
                     async for raw in ws:
@@ -536,8 +599,10 @@ class InfoWayFeed:
                             continue
                         c = msg.get("code")
                         if c == CMD_PUSH_DEPTH:
+                            self._last_msg_ts = time.time()
                             self._emit_depth(msg.get("data") or {})
                         elif c == CMD_PUSH_TRADE:
+                            self._last_msg_ts = time.time()
                             self._emit_trade(msg.get("data") or {})
                         elif c == CMD_HEARTBEAT:
                             continue
@@ -560,9 +625,10 @@ class InfoWayFeed:
                     break
                 backoff = min(backoff * 2.0, RECONNECT_BACKOFF_MAX)
             finally:
-                if hb_task:
-                    hb_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await hb_task
+                for t in (hb_task, mon_task):
+                    if t:
+                        t.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await t
 
         logger.info("InfoWay [conn-%d] task ended", conn_idx)

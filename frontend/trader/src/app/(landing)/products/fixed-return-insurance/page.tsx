@@ -14,15 +14,15 @@ export default function FixedReturnInsurancePage() {
   return (
     <main className="min-h-screen bg-background">
       <BannerPlaceholder
-        title="AI Powered Staking Program"
-        tagline="Capital-protected, AI powered staking program yield plans for the part of your portfolio that needs to sleep at night."
+        title="AI-POWERED STAKING PROGRAM"
+        tagline="Capital-protected, fixed-yield plans for the part of your portfolio that needs to sleep at night."
       />
 
       {/* Key features */}
       <section id="features" className="mx-auto max-w-[1200px] px-[var(--gutter)] py-16 sm:py-20">
         <div className="text-center mb-12">
           <h2 className="font-display uppercase text-2xl sm:text-3xl md:text-4xl tracking-tight">
-            <span className="text-primary">Capital protection</span> meets an AI powered staking program yield
+            <span className="text-primary">Capital protection</span> meets a fixed yield
           </h2>
           <p className="mt-4 text-foreground/65 max-w-2xl mx-auto text-sm sm:text-base leading-relaxed">
             A regulated, third-party-underwritten product. Lock in a known return for a fixed tenure;
@@ -33,7 +33,7 @@ export default function FixedReturnInsurancePage() {
         <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-5">
           {[
             { icon: ShieldCheck, title: 'Capital Protection',       body: 'Your principal is segregated and underwritten by a Tier-1 insurance counterparty. Returned in full at maturity.' },
-            { icon: TrendingUp,  title: 'AI Powered Staking Program',        body: 'A clearly stated annual yield — no surprises, no last-look. What you sign up for is what you receive.' },
+            { icon: TrendingUp,  title: 'AI-POWERED STAKING PROGRAMs',             body: 'A clearly stated annual yield — no surprises, no last-look. What you sign up for is what you receive.' },
             { icon: Calendar,    title: 'Flexible Tenure',           body: 'Choose 6 months, 12 months, or 24 months. Longer tenures earn higher yields.' },
             { icon: Lock,        title: 'Segregated Accounts',       body: 'Funds are held separately from SwisDex operating capital, in regulated bank custody.' },
             { icon: FileCheck,   title: 'Regulatory Compliance',     body: 'AML / KYC verified. Compliant with relevant financial market authorities in our operating jurisdictions.' },
@@ -48,7 +48,7 @@ export default function FixedReturnInsurancePage() {
         </div>
       </section>
 
-      {/* Fixed Return rate matrix */}
+      {/* AI-POWERED STAKING PROGRAM rate matrix */}
       <FixedReturnRateTable />
 
       {/* Interactive payout calculator — pulls from the same rate matrix */}
@@ -64,7 +64,7 @@ export default function FixedReturnInsurancePage() {
             { n: '01', title: 'Apply',         body: 'Submit a short application with KYC documents. Approval typically within 24 hours.' },
             { n: '02', title: 'Fund the Plan', body: 'Transfer your principal via bank wire, card, or crypto. Funds enter the segregated trust account.' },
             { n: '03', title: 'Quarterly Updates', body: 'Receive performance statements and (where applicable) quarterly yield payouts.' },
-            { n: '04', title: 'Mature & Withdraw', body: 'At the end of the tenure, your principal plus the AI powered staking program yield is wired back to your account.' },
+            { n: '04', title: 'Mature & Withdraw', body: 'At the end of the tenure, your principal plus the AI-POWERED STAKING PROGRAM is wired back to your account.' },
           ].map(({ n, title, body }) => (
             <li key={n} className="liquid-glass rounded-2xl p-6">
               <span className="font-display text-4xl text-primary/70">{n}</span>
@@ -83,7 +83,7 @@ export default function FixedReturnInsurancePage() {
           </h2>
           <div className="mt-4 text-xs sm:text-sm text-foreground/65 leading-relaxed space-y-3">
             <p>
-              AI Powered Staking Program plans are underwritten by independent, regulated insurance counterparties.
+              AI-POWERED STAKING PROGRAM plans are underwritten by independent, regulated insurance counterparties.
               Capital protection refers to the contractual obligation of the underwriter at maturity, subject
               to the underwriter's solvency and the terms of the policy.
             </p>
@@ -132,7 +132,7 @@ export default function FixedReturnInsurancePage() {
         <div className="liquid-glass-strong rounded-3xl p-8 sm:p-12 text-center">
           <h2 className="font-display uppercase text-2xl sm:text-3xl tracking-tight">Build the stable core of your portfolio</h2>
           <p className="mt-4 text-foreground/70 max-w-xl mx-auto text-sm sm:text-base">
-            Capital-protected, AI powered staking program yield, regulated. Apply in minutes, fund in days.
+            Capital-protected, fixed-yield, regulated. Apply in minutes, fund in days.
           </p>
           <Link href="/auth/register" className="mt-7 inline-flex items-center gap-2 rounded-full bg-primary text-white px-6 py-3 text-sm font-semibold uppercase tracking-wider hover:opacity-90">
             Open Account <ArrowUpRight className="size-4" />

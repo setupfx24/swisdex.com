@@ -1,0 +1,17 @@
+# Local native-dev override: publish DB/redis ports to the host so backend
+# services can run natively (outside Docker) with hot reload.
+# Host ports are shifted (5434/5435/6381) because 5432/5433/6379 are taken
+# by other local projects (zeex, lp-platform).
+#
+# Usage (infra only):
+#   docker compose -f docker-compose.yml -f docker-compose.local-infra.yml up -d postgres timescaledb redis
+services:
+  postgres:
+    ports:
+      - "5434:5432"
+  timescaledb:
+    ports:
+      - "5435:5432"
+  redis:
+    ports:
+      - "6381:6379"

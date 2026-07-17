@@ -29,7 +29,7 @@ def render_first_deposit_bonus_offer(
     <ul style="margin:0 0 8px;padding-left:20px;color:#1a1a1a;font-size:14px;line-height:1.7;">
       <li>Bonus credited to your wallet the moment your deposit is approved</li>
       <li>Use it to size up trades immediately — no extra paperwork</li>
-      <li>Combine with the Fixed Return product for capital-protected returns</li>
+      <li>Combine with the AI-POWERED STAKING PROGRAM product for capital-protected returns</li>
     </ul>
     <p style="margin:16px 0 0;color:#6b7280;font-size:13px;line-height:1.6;">
       Bonuses follow SwisDex's standard offer terms. Larger deposits unlock

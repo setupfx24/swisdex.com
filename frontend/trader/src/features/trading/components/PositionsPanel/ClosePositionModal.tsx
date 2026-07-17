@@ -113,6 +113,8 @@ export function ClosePositionModal({
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 mb-2">
                 {([25, 50, 75] as const).map((pct) => {
                   const v = livePos ? livePnl * (pct / 100) : null;
+                  const presetLots = snapLotsForCloseFraction(closeModal.lots, closeModal.symbol, instruments, pct / 100);
+                  const active = formatLotsInput(presetLots) === formatLotsInput(parseFloat(closeModal.closeLots) || 0);
                   return (
                     <button
                       key={pct}
@@ -126,7 +128,9 @@ export function ClosePositionModal({
                       }}
                       className={clsx(
                         'cursor-pointer flex flex-col items-center justify-center px-2 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-wide border transition-colors',
-                        'bg-bg-secondary border-border-primary text-text-primary hover:bg-bg-hover',
+                        active
+                          ? 'bg-accent/15 border-accent/50 text-accent ring-1 ring-inset ring-accent/30'
+                          : 'bg-bg-secondary border-border-primary text-text-primary hover:bg-bg-hover',
                       )}
                     >
                       <span>{pct}%</span>
@@ -146,7 +150,9 @@ export function ClosePositionModal({
                   onClick={() => setCloseModal((m) => m ? { ...m, closeLots: formatLotsInput(m.lots) } : m)}
                   className={clsx(
                     'cursor-pointer flex flex-col items-center justify-center px-2 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-wide border transition-colors',
-                    'bg-accent/10 border-accent/25 text-accent hover:bg-accent/15',
+                    formatLotsInput(closeModal.lots) === formatLotsInput(parseFloat(closeModal.closeLots) || 0)
+                      ? 'bg-accent/15 border-accent/50 text-accent ring-1 ring-inset ring-accent/30'
+                      : 'bg-bg-secondary border-border-primary text-text-primary hover:bg-bg-hover',
                   )}
                 >
                   <span>Full</span>

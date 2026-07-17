@@ -175,7 +175,7 @@ This page has its **own** inline hero (no `<BannerPlaceholder>`).
 
 ---
 
-## 9. Products — Fixed Return Insurance (`/products/fixed-return-insurance`)
+## 9. Products — AI-POWERED STAKING PROGRAM (`/products/fixed-return-insurance`)
 
 - File: `src/app/(landing)/products/fixed-return-insurance/page.tsx`
 - No inline image placeholders (the apply form was removed).
@@ -234,6 +234,6 @@ That's it. The gradient fallback only renders when no `bannerSrc` is supplied.
 - [ ] All forms wired to a real backend (not `alert(…)`).
 - [ ] `partners@swisdex.com`, `support@swisdex.com`, etc. replaced with monitored inboxes.
 - [ ] Calculator pip values reviewed by trading desk.
-- [ ] Fixed Return plan rates, minimums, and disclosure copy reviewed by compliance.
+- [ ] AI-POWERED STAKING PROGRAM plan rates, minimums, and disclosure copy reviewed by compliance.
 - [ ] PDFs uploaded, blog posts wired to per-post routes.
 - [ ] OG / Twitter share images added per page (not scaffolded yet).

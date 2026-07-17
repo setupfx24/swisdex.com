@@ -5,7 +5,7 @@ extra amount the broker pays out as promotion/incentive. Most categories (FR
 referral commission, deposit bonuses, referral/IB bounties, IB commission) are
 aggregated at read-time from existing `transactions` / `ib_commissions` rows —
 no schema needed. This table holds ONLY the MANUAL entries an admin logs for
-give-aways that have no existing record (e.g. extra Fixed Return interest granted
+give-aways that have no existing record (e.g. extra AI-POWERED STAKING PROGRAM interest granted
 off-matrix, or a custom promotional benefit). It is admin-only and never shown in
 a user's wallet history, so it can't be confused with real money movement.
 

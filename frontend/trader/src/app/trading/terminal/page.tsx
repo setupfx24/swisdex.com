@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState, useCallback, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import dynamic from 'next/dynamic';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { clsx } from 'clsx';
@@ -17,6 +18,7 @@ import Watchlist from '@/components/trading/Watchlist';
 import InstrumentsTable from '@/components/trading/InstrumentsTable';
 import OrderPanel from '@/components/trading/OrderPanel';
 import RiskCalculator from '@/components/trading/RiskCalculator';
+import OrderPanelSymbolPicker from '@/components/trading/OrderPanelSymbolPicker';
 import { useDocumentTitle } from '@/hooks/useDocumentTitle';
 import PositionsPanel from '@/components/trading/PositionsPanel';
 import { ActiveAccountBadge } from '@/components/trading/ActiveAccountBadge';
@@ -187,6 +189,7 @@ export default function TradingTerminalPage() {
 
   const onFocusSymbolSearch = useCallback(() => {
     setTerminalNewsOpen(false);
+    setTerminalCalcOpen(false); // was missing → Search left the calculator panel showing
     setTerminalMarketsOpen(true);
     setChartExpanded(false);
     requestAnimationFrame(() => {
@@ -194,7 +197,7 @@ export default function TradingTerminalPage() {
         document.querySelector<HTMLInputElement>('[data-terminal-symbol-search]')?.focus();
       });
     });
-  }, [setTerminalMarketsOpen, setTerminalNewsOpen]);
+  }, [setTerminalMarketsOpen, setTerminalNewsOpen, setTerminalCalcOpen]);
 
   const onPanelsSelectMarkets = useCallback(() => {
     setTerminalNewsOpen(false);
@@ -289,6 +292,27 @@ export default function TradingTerminalPage() {
     }
   }, [selectedSymbol]);
 
+  // Persist the open chart tabs so they survive a re-mount / reload. Without this
+  // the local state resets to [] on re-mount and the effect above re-adds only
+  // the current symbol — i.e. the tabs "collapse to one". Load once on mount;
+  // save on change, but never overwrite the saved list with the empty initial
+  // state. (client 2026-07-11)
+  useEffect(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('swisdex-chart-tabs') || '[]');
+      if (Array.isArray(saved) && saved.length) {
+        setChartTabs((prev) => Array.from(new Set([
+          ...saved.filter((s: unknown): s is string => typeof s === 'string'),
+          ...prev,
+        ])));
+      }
+    } catch { /* ignore corrupt storage */ }
+  }, []);
+  useEffect(() => {
+    if (chartTabs.length === 0) return;
+    try { localStorage.setItem('swisdex-chart-tabs', JSON.stringify(chartTabs)); } catch { /* ignore */ }
+  }, [chartTabs]);
+
   const removeTab = (e: React.MouseEvent, symbol: string) => {
     e.stopPropagation();
     const nextTabs = chartTabs.filter(s => s !== symbol);
@@ -297,6 +321,25 @@ export default function TradingTerminalPage() {
       setSelectedSymbol(nextTabs[nextTabs.length - 1]);
     }
   };
+
+  // Desktop chart-tab "+" symbol picker: add / switch instruments. Picking a
+  // symbol makes it the active chart symbol (auto-added as a tab by the effect
+  // above). (client 2026-07-11)
+  const [chartSymbolPickerOpen, setChartSymbolPickerOpen] = useState(false);
+  const [addMenuPos, setAddMenuPos] = useState<{ left: number; top: number } | null>(null);
+  const addBtnRef = useRef<HTMLButtonElement>(null);
+  const addPopRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!chartSymbolPickerOpen) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node;
+      // Menu is portaled to <body>; accept clicks on the trigger or the popup.
+      if (addBtnRef.current?.contains(t) || addPopRef.current?.contains(t)) return;
+      setChartSymbolPickerOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [chartSymbolPickerOpen]);
 
   if (!accountId) {
     return (
@@ -648,6 +691,62 @@ export default function TradingTerminalPage() {
                   <Minimize2 className="w-3.5 h-3.5 shrink-0" aria-hidden />
                   Normal view
                 </button>
+              </div>
+            ) : null}
+            {!chartExpanded ? (
+              <div className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 border-b border-border-primary bg-bg-secondary overflow-x-auto no-scrollbar scrollbar-none">
+                {chartTabs.map((sym) => (
+                  <button
+                    key={sym}
+                    type="button"
+                    onClick={() => setSelectedSymbol(sym)}
+                    className={clsx(
+                      'group shrink-0 flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-bold transition-all border whitespace-nowrap',
+                      sym === selectedSymbol
+                        ? 'bg-bg-primary text-text-primary border-border-glass shadow-sm'
+                        : 'bg-transparent text-text-tertiary border-transparent hover:text-text-primary hover:bg-bg-hover',
+                    )}
+                  >
+                    {sym}
+                    <span
+                      onClick={(e) => removeTab(e, sym)}
+                      className="p-0.5 rounded hover:bg-sell/15 hover:text-sell opacity-50 group-hover:opacity-100 transition-colors"
+                      aria-label={`Close ${sym}`}
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><path d="M18 6 6 18M6 6l12 12" /></svg>
+                    </span>
+                  </button>
+                ))}
+                <button
+                  ref={addBtnRef}
+                  type="button"
+                  onClick={() => {
+                    if (chartSymbolPickerOpen) { setChartSymbolPickerOpen(false); return; }
+                    const r = addBtnRef.current?.getBoundingClientRect();
+                    if (r) setAddMenuPos({ left: r.left, top: r.bottom + 6 });
+                    setChartSymbolPickerOpen(true);
+                  }}
+                  title="Add instrument"
+                  aria-label="Add instrument"
+                  className="shrink-0 w-8 h-8 flex items-center justify-center rounded-lg bg-bg-hover/80 text-text-primary border border-border-glass hover:bg-buy/10 hover:border-buy/40 transition-all active:scale-95"
+                >
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M12 5v14M5 12h14" /></svg>
+                </button>
+                {chartSymbolPickerOpen && addMenuPos && typeof document !== 'undefined' && createPortal(
+                  <div
+                    ref={addPopRef}
+                    style={{ position: 'fixed', left: addMenuPos.left, top: addMenuPos.top, zIndex: 2147483646 }}
+                    className="w-64 rounded-lg border border-border-primary bg-bg-secondary shadow-2xl overflow-hidden"
+                  >
+                    <OrderPanelSymbolPicker
+                      onPick={(sym) => {
+                        setSelectedSymbol(sym);
+                        setChartSymbolPickerOpen(false);
+                      }}
+                    />
+                  </div>,
+                  document.body,
+                )}
               </div>
             ) : null}
             <div className="flex-1 min-w-0 min-h-0 overflow-hidden relative">

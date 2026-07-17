@@ -110,6 +110,11 @@ class Settings(BaseSettings):
     # underlying account is named differently.
     MAIL_FROM_NAME: str = "SwisDex"
     SMTP_USE_TLS: bool = True
+    # Comma-separated exact addresses that must NEVER be emailed — team test
+    # accounts whose mailbox doesn't exist (e.g. ib1@gmail.com). Every mail to
+    # them hard-bounces back to the sender inbox and, in volume, damages
+    # sender reputation. Checked at the single send choke point (smtp_mail).
+    EMAIL_SUPPRESSION_LIST: str = ""
 
     # ─── Per-category From aliases (Hostinger / any SMTP) ────────────────
     # SMTP authenticates as SMTP_USER (the mailbox owner) but the visible

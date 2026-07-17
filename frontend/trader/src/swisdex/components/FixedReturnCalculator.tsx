@@ -1,9 +1,9 @@
 'use client';
 
 /**
- * Fixed Return Funds — public landing calculator.
+ * AI-POWERED STAKING PROGRAM Funds — public landing calculator.
  *
- * Mirrors the user-dashboard Fixed Return calculator (app/fixed-return):
+ * Mirrors the user-dashboard AI-POWERED STAKING PROGRAM calculator (app/fixed-return):
  * it pulls the SAME live rate matrix the dashboard uses (via the public
  * /fixed-return/public-config endpoint) and runs the identical projection
  * math, so the website always shows the exact numbers a logged-in user
@@ -148,13 +148,13 @@ export function FixedReturnCalculator() {
     <section className="mx-auto max-w-[1200px] px-[var(--gutter)] py-12 sm:py-16">
       <div className="text-center mb-10">
         <span className="inline-flex items-center gap-2 px-3 py-1 rounded-full liquid-glass text-[11px] uppercase tracking-[0.16em] text-foreground/70">
-          <Calculator className="size-3.5" /> AI Powered Staking Program Calculator
+          <Calculator className="size-3.5" /> AI-POWERED STAKING PROGRAM Calculator
         </span>
         <h2 className="mt-5 font-display uppercase text-2xl sm:text-3xl md:text-4xl tracking-tight">
           Estimate Your Payout
         </h2>
         <p className="mt-3 text-foreground/65 max-w-xl mx-auto text-sm sm:text-base">
-          Pick a deposit and tenure — see your AI powered staking program yield at maturity. Live
+          Pick a deposit and tenure — see your AI-POWERED STAKING PROGRAM at maturity. Live
           rates, the same ones you get inside your account.
         </p>
       </div>

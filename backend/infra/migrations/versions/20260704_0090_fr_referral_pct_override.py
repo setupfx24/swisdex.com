@@ -1,4 +1,4 @@
-"""Per-referrer Fixed Return referral-commission % override.
+"""Per-referrer AI-POWERED STAKING PROGRAM referral-commission % override.
 
 The FR referral commission % (on principal and on interest) is a GLOBAL setting
 (fr_referral_principal_pct / fr_referral_interest_pct). This adds an optional

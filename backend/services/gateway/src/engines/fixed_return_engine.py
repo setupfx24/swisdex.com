@@ -1,4 +1,4 @@
-"""Fixed Return interest-payout engine.
+"""AI-POWERED STAKING PROGRAM interest-payout engine.
 
 Polls hourly; on every tick it calls fixed_return_service.accrue_due_payouts
 which credits one interest cycle to every active lock whose
@@ -27,7 +27,7 @@ class FixedReturnEngine:
 
     async def start(self):
         self._running = True
-        logger.info("Fixed Return engine started (tick=%ds)", TICK_INTERVAL)
+        logger.info("AI-POWERED STAKING PROGRAM engine started (tick=%ds)", TICK_INTERVAL)
         asyncio.create_task(self._run())
 
     async def stop(self):
@@ -46,11 +46,11 @@ class FixedReturnEngine:
                     paid = await fixed_return_service.accrue_due_payouts(db)
                 if paid:
                     logger.info(
-                        "Fixed Return: paid %d interest cycle(s) at %s",
+                        "AI-POWERED STAKING PROGRAM: paid %d interest cycle(s) at %s",
                         paid, datetime.now(timezone.utc).isoformat(),
                     )
             except Exception as e:
-                logger.error("Fixed Return engine error: %s", e, exc_info=True)
+                logger.error("AI-POWERED STAKING PROGRAM engine error: %s", e, exc_info=True)
             await asyncio.sleep(TICK_INTERVAL)
 
 

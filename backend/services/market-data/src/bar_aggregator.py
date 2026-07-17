@@ -1,12 +1,20 @@
 """Bar Aggregator — Aggregates ticks into OHLCV bars for multiple timeframes."""
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 from collections import defaultdict
 
 from packages.common.src.redis_client import redis_client
 
 logger = logging.getLogger("market-data.aggregator")
+
+# When a symbol has had NO real tick for this long, treat the market as closed
+# (weekend/holiday) or the feed as down. run_aggregation_loop then FREEZES that
+# symbol's candles — it stops rolling windows forward / painting flat "doji" bars,
+# so e.g. gold shows Friday's last candle across the weekend instead of a running
+# flat line. A single live tick immediately un-freezes it. (client 2026-07-11)
+MARKET_CLOSED_AFTER_SEC = 120.0
 
 TIMEFRAMES = {
     "1m": 60,
@@ -46,8 +54,13 @@ class BarAggregator:
         # every CLOSED bar is persisted to the marketdata DB (ohlcv_<tf>) so chart
         # history is deep + restart-proof. None → Redis-only (backward compatible).
         self.ohlc_store = None
+        # Monotonic wall-clock of the last REAL tick per symbol. Only update() sets
+        # it, and only live ticks reach update() — so it's the signal for the
+        # market-closed freeze in run_aggregation_loop.
+        self._last_real_tick: dict[str, float] = {}
 
     def update(self, symbol: str, bid: float, ask: float, timestamp: str):
+        self._last_real_tick[symbol] = time.monotonic()
         mid = (bid + ask) / 2
         now = datetime.fromisoformat(timestamp).replace(tzinfo=timezone.utc)
         epoch = int(now.timestamp())
@@ -157,7 +170,13 @@ class BarAggregator:
         import json
         while True:
             now_epoch = int(datetime.now(timezone.utc).timestamp())
+            now_mono = time.monotonic()
             for symbol, timeframes in list(self._bars.items()):
+                # Market closed (weekend/holiday) or feed down → no real ticks for
+                # a while → freeze this symbol's candles (see MARKET_CLOSED_AFTER_SEC).
+                symbol_stale = (
+                    now_mono - self._last_real_tick.get(symbol, 0.0)
+                ) > MARKET_CLOSED_AFTER_SEC
                 for tf_name, bar in list(timeframes.items()):
                     tf_seconds = TIMEFRAMES.get(tf_name, 60)
                     bar_start = self._bar_timestamps.get(symbol, {}).get(tf_name)
@@ -170,6 +189,13 @@ class BarAggregator:
                             asyncio.create_task(
                                 self._store_bar(symbol, tf_name, old_bar, bar_start)
                             )
+                        if symbol_stale:
+                            # Market closed / feed down: FREEZE. Do NOT paint dojis
+                            # or open a new window — leave the last real bar as the
+                            # last visible candle (e.g. gold over the weekend). The
+                            # next live tick reopens the window via update().
+                            self._bar_timestamps.get(symbol, {}).pop(tf_name, None)
+                            continue
                         last_close = bar.close
                         # Fill only TINY micro-pauses (≤2 missed windows) with a
                         # doji so the time axis stays smooth, but leave genuine

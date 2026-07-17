@@ -57,7 +57,7 @@ const config: Config = {
       fontSize: {
         // Client report 2026-06-09: admin text was unreadable — the
         // whole scale ran 10–14px. Bumped every tier up ~2px so dense
-        // config tables (Fixed Return, IB Tiers, Charges, Spreads)
+        // config tables (AI-POWERED STAKING PROGRAM, IB Tiers, Charges, Spreads)
         // read comfortably. Line-heights scaled to match.
         'xxs': ['12px', { lineHeight: '16px' }],
         'xs': ['13px', { lineHeight: '18px' }],

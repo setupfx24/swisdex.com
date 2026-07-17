@@ -325,6 +325,13 @@ export default function PositionsPanel({ variant = 'default' }: PositionsPanelPr
   const [bulkConfirm, setBulkConfirm] = useState<BulkCloseType | null>(null);
   const [bulkBusy, setBulkBusy] = useState(false);
   const bulkMenuRef = useRef<HTMLDivElement>(null);
+  const bulkBtnRef = useRef<HTMLButtonElement>(null);
+  const bulkPopRef = useRef<HTMLDivElement>(null);
+  // Fixed-position anchor for the portaled Close-All menu. It must be portaled to
+  // <body>: the header row is overflow-x-auto (→ overflow-y:auto) inside an
+  // overflow-hidden box, which clipped the old inline dropdown invisible — so the
+  // button looked dead. (client 2026-07-11)
+  const [bulkMenuPos, setBulkMenuPos] = useState<{ right: number; bottom: number } | null>(null);
   /** Terminal open tab: static trade cards vs compact table. */
   const [terminalOpenCardView, setTerminalOpenCardView] = useState(false);
   const [sharePosition, setSharePosition] = useState<Position | null>(null);
@@ -337,9 +344,11 @@ export default function PositionsPanel({ variant = 'default' }: PositionsPanelPr
   useEffect(() => {
     if (!bulkMenuOpen) return;
     const handler = (e: MouseEvent) => {
-      if (bulkMenuRef.current && !bulkMenuRef.current.contains(e.target as Node)) {
-        setBulkMenuOpen(false);
-      }
+      const t = e.target as Node;
+      // The menu is portaled to <body>, so accept clicks on either the trigger
+      // wrapper or the popup itself; only an outside click closes it.
+      if (bulkMenuRef.current?.contains(t) || bulkPopRef.current?.contains(t)) return;
+      setBulkMenuOpen(false);
     };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
@@ -854,10 +863,19 @@ export default function PositionsPanel({ variant = 'default' }: PositionsPanelPr
                 {isTerminal && activeTab === 'open' && (
                   <div className="flex items-center gap-1 shrink-0 pb-0.5 border-l border-border-primary ml-1 pl-2">
                     {positions.length > 0 && (
-                      <div className="relative" ref={bulkMenuRef}>
+                      <div ref={bulkMenuRef}>
                         <button
+                          ref={bulkBtnRef}
                           type="button"
-                          onClick={() => setBulkMenuOpen((o) => !o)}
+                          onClick={() => {
+                            if (bulkMenuOpen) { setBulkMenuOpen(false); return; }
+                            const r = bulkBtnRef.current?.getBoundingClientRect();
+                            if (r) setBulkMenuPos({
+                              right: Math.max(4, window.innerWidth - r.right),
+                              bottom: window.innerHeight - r.top + 6, // open UPWARD (panel sits at the bottom)
+                            });
+                            setBulkMenuOpen(true);
+                          }}
                           className="flex items-center gap-0.5 px-2 py-1 rounded-md text-[11px] font-semibold text-text-secondary hover:text-text-primary hover:bg-bg-hover border border-border-primary hover:border-border-secondary transition-colors"
                         >
                           Close All
@@ -865,24 +883,22 @@ export default function PositionsPanel({ variant = 'default' }: PositionsPanelPr
                             className={clsx('w-3.5 h-3.5 transition-transform shrink-0', bulkMenuOpen && 'rotate-180')}
                           />
                         </button>
-                        {bulkMenuOpen && (
-                          <div className="absolute right-0 top-full mt-1 min-w-[180px] py-1 rounded-lg border border-border-primary bg-card shadow-xl z-[100]">
+                        {bulkMenuOpen && bulkMenuPos && typeof document !== 'undefined' && createPortal(
+                          <div
+                            ref={bulkPopRef}
+                            style={{ position: 'fixed', right: bulkMenuPos.right, bottom: bulkMenuPos.bottom, zIndex: 2147483646 }}
+                            className="min-w-[180px] py-1 rounded-lg border border-border-primary bg-card shadow-xl"
+                          >
                             <button
                               type="button"
-                              onClick={() => {
-                                setBulkMenuOpen(false);
-                                setBulkConfirm('all');
-                              }}
+                              onClick={() => { setBulkMenuOpen(false); setBulkConfirm('all'); }}
                               className="w-full text-left px-3 py-2 text-xs text-text-primary hover:bg-bg-hover"
                             >
                               Close all ({positions.length})
                             </button>
                             <button
                               type="button"
-                              onClick={() => {
-                                setBulkMenuOpen(false);
-                                setBulkConfirm('profit');
-                              }}
+                              onClick={() => { setBulkMenuOpen(false); setBulkConfirm('profit'); }}
                               disabled={profitPositions.length === 0}
                               className="w-full text-left px-3 py-2 text-xs text-accent hover:bg-bg-hover disabled:opacity-40"
                             >
@@ -890,16 +906,14 @@ export default function PositionsPanel({ variant = 'default' }: PositionsPanelPr
                             </button>
                             <button
                               type="button"
-                              onClick={() => {
-                                setBulkMenuOpen(false);
-                                setBulkConfirm('loss');
-                              }}
+                              onClick={() => { setBulkMenuOpen(false); setBulkConfirm('loss'); }}
                               disabled={lossPositions.length === 0}
                               className="w-full text-left px-3 py-2 text-xs text-[#ff5252] hover:bg-bg-hover disabled:opacity-40"
                             >
                               Close losing ({lossPositions.length})
                             </button>
-                          </div>
+                          </div>,
+                          document.body,
                         )}
                       </div>
                     )}
@@ -1863,6 +1877,8 @@ export default function PositionsPanel({ variant = 'default' }: PositionsPanelPr
                       <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 mb-2">
                         {([25, 50, 75] as const).map((pct) => {
                           const pv = pos ? previewFor(pct / 100) : null;
+                          const presetLots = snapLotsForCloseFraction(closeModal.lots, closeModal.symbol, instruments, pct / 100);
+                          const active = formatLotsInput(presetLots) === formatLotsInput(parseFloat(closeModal.closeLots) || 0);
                           return (
                             <button
                               key={pct}
@@ -1876,7 +1892,9 @@ export default function PositionsPanel({ variant = 'default' }: PositionsPanelPr
                               }}
                               className={clsx(
                                 'cursor-pointer flex flex-col items-center justify-center px-2 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-wide border transition-colors',
-                                'bg-bg-secondary border-border-primary text-text-primary hover:bg-bg-hover',
+                                active
+                                  ? 'bg-accent/15 border-accent/50 text-accent ring-1 ring-inset ring-accent/30'
+                                  : 'bg-bg-secondary border-border-primary text-text-primary hover:bg-bg-hover',
                               )}
                             >
                               <span>{pct}%</span>
@@ -1900,7 +1918,9 @@ export default function PositionsPanel({ variant = 'default' }: PositionsPanelPr
                           }}
                           className={clsx(
                             'cursor-pointer flex flex-col items-center justify-center px-2 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-wide border transition-colors',
-                            'bg-accent/10 border-accent/25 text-accent hover:bg-accent/15',
+                            formatLotsInput(closeModal.lots) === formatLotsInput(parseFloat(closeModal.closeLots) || 0)
+                              ? 'bg-accent/15 border-accent/50 text-accent ring-1 ring-inset ring-accent/30'
+                              : 'bg-bg-secondary border-border-primary text-text-primary hover:bg-bg-hover',
                           )}
                         >
                           <span>Full</span>

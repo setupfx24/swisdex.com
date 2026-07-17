@@ -80,12 +80,15 @@ interface User {
   balance: number;
   /** Total: main wallet + sum of trading account equity */
   equity: number;
-  main_wallet_balance?: number;
-  trading_balance?: number;
-  trading_equity?: number;
+  main_wallet_balance?: number | null;
+  trading_balance?: number | null;
+  trading_equity?: number | null;
   group: string;
   kyc_status: string;
   status: string;
+  /** Promotional/pilot account — shown as email + a "Promotional" badge only,
+   *  every other field blanked (client 2026-07-11). */
+  is_promotional?: boolean;
 }
 
 interface UsersResponse {
@@ -726,6 +729,33 @@ export default function UsersPage() {
               </thead>
               <tbody>
                 {!loading && sorted.map(u => (
+                  u.is_promotional ? (
+                    /* Promotional account: email + a "Promotional" badge only —
+                       every other column is intentionally blanked. */
+                    <tr key={u.id} className="border-b border-border-primary/40 transition-fast hover:bg-bg-hover/60 group/row bg-warning/[0.03]">
+                      <td className="px-3 py-3 text-text-tertiary font-mono tabular-nums whitespace-nowrap" title={u.id}>{u.id.slice(0, 8)}…</td>
+                      <td className="px-3 py-3 whitespace-nowrap">
+                        <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-semibold bg-warning/15 text-warning uppercase tracking-wide">
+                          Promotional
+                        </span>
+                      </td>
+                      <td className="px-3 py-3 text-text-secondary whitespace-nowrap">{u.email}</td>
+                      <td className="px-3 py-3 text-right text-text-tertiary whitespace-nowrap">—</td>
+                      <td className="px-3 py-3 text-right text-text-tertiary whitespace-nowrap">—</td>
+                      <td className="px-3 py-3 text-text-tertiary whitespace-nowrap">—</td>
+                      <td className="px-3 py-3 text-text-tertiary whitespace-nowrap">—</td>
+                      <td className="px-3 py-3 text-text-tertiary whitespace-nowrap">—</td>
+                      <td className="px-2 py-3 text-center whitespace-nowrap" data-actions-menu>
+                        <button
+                          type="button"
+                          onClick={(e) => toggleActions(u.id, e)}
+                          className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-border-primary text-text-secondary transition-fast hover:bg-bg-hover hover:text-text-primary hover:border-border-secondary"
+                        >
+                          <MoreHorizontal size={15} />
+                        </button>
+                      </td>
+                    </tr>
+                  ) : (
                   <tr key={u.id} className="border-b border-border-primary/40 transition-fast hover:bg-bg-hover/60 group/row">
                     <td className="px-3 py-3 text-text-tertiary font-mono tabular-nums whitespace-nowrap" title={u.id}>{u.id.slice(0, 8)}…</td>
                     <td className="px-3 py-3 whitespace-nowrap">
@@ -739,7 +769,7 @@ export default function UsersPage() {
                     <td className="px-3 py-3 text-text-secondary whitespace-nowrap">{u.email}</td>
                     <td className="px-3 py-3 text-right whitespace-nowrap">
                       <div className="text-text-primary font-mono tabular-nums font-medium">${formatMoney(u.balance)}</div>
-                      {u.main_wallet_balance !== undefined && (
+                      {u.main_wallet_balance !== undefined && u.main_wallet_balance !== null && (
                         <div className="text-[10px] text-text-tertiary font-mono tabular-nums mt-0.5">
                           Wallet ${formatMoney(u.main_wallet_balance)} · Trading ${formatMoney(u.trading_balance ?? 0)}
                         </div>
@@ -763,6 +793,7 @@ export default function UsersPage() {
                       </button>
                     </td>
                   </tr>
+                  )
                 ))}
               </tbody>
             </table>

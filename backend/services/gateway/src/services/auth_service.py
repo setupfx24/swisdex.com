@@ -18,6 +18,7 @@ from packages.common.src.config import get_settings
 from packages.common.src.models import (
     User, UserSession, TradingAccount, AccountGroup,
     IBProfile, Referral, PasswordResetToken, UserRefreshToken, UserAuditLog,
+    Position, PositionStatus, Order, OrderStatus,
 )
 from packages.common.src.schemas import TokenResponse
 from packages.common.src.auth import (
@@ -28,7 +29,10 @@ from packages.common.src.auth import (
 logger = logging.getLogger("auth_service")
 
 DEMO_SHARED_EMAIL = "demo@swisdex.com"
-DEMO_STARTING_BALANCE = Decimal("1000")
+# Client 2026-07-14: the demo playground must ALWAYS greet the visitor with
+# $100,000 — the shared account was drained to ~$0 by previous visitors'
+# trades because the balance was only set once at creation.
+DEMO_STARTING_BALANCE = Decimal("100000")
 
 _rate_buckets: dict[str, list[float]] = {}
 
@@ -944,10 +948,49 @@ async def _ensure_demo_trading_account(db: AsyncSession, user: User) -> None:
     await db.flush()
 
 
+async def _reset_demo_state(db: AsyncSession, user: User) -> None:
+    """Fresh playground on EVERY demo login (client 2026-07-14): the demo is a
+    SHARED account, so previous visitors' trades drained it — new visitors saw
+    $0 instead of the promised $100,000. Cancel leftover pending orders, close
+    leftover open positions flat (at open price, zero P&L — no FK deletes),
+    and reset every balance to DEMO_STARTING_BALANCE. Same philosophy as the
+    profile-field reset above: each visitor gets the canonical demo."""
+    if not user.is_demo:
+        return
+    now = datetime.now(timezone.utc)
+    accounts = (await db.execute(
+        select(TradingAccount).where(TradingAccount.user_id == user.id)
+    )).scalars().all()
+    for acct in accounts:
+        pending = (await db.execute(
+            select(Order).where(
+                Order.account_id == acct.id, Order.status == OrderStatus.PENDING,
+            )
+        )).scalars().all()
+        for o in pending:
+            o.status = OrderStatus.CANCELLED
+        open_pos = (await db.execute(
+            select(Position).where(
+                Position.account_id == acct.id, Position.status == PositionStatus.OPEN,
+            )
+        )).scalars().all()
+        for p in open_pos:
+            p.status = PositionStatus.CLOSED
+            p.close_price = p.open_price
+            p.profit = Decimal("0")
+            p.closed_at = now
+        acct.balance = DEMO_STARTING_BALANCE
+        acct.equity = DEMO_STARTING_BALANCE
+        acct.free_margin = DEMO_STARTING_BALANCE
+        acct.margin_used = Decimal("0")
+    user.main_wallet_balance = DEMO_STARTING_BALANCE
+
+
 async def demo_login(request: Request, db: AsyncSession) -> JSONResponse:
     await rate_limit_http(request, "demo-login", 30, 60.0)
     user = await _ensure_shared_demo_user(db)
     await _ensure_demo_trading_account(db, user)
+    await _reset_demo_state(db, user)
     _blk = login_block_message(user.status)
     if _blk:
         raise AuthServiceError(_blk, 403)

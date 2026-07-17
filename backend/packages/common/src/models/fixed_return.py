@@ -1,4 +1,4 @@
-"""Fixed Return — user principal locks against an admin-tunable rate matrix.
+"""AI-POWERED STAKING PROGRAM — user principal locks against an admin-tunable rate matrix.
 
 Rates and the early-withdrawal fee live in ``system_settings`` (JSON +
 percent), not in dedicated tables, so admins can change the matrix in
@@ -74,11 +74,16 @@ class FixedReturnLock(Base):
     # Running totals updated by the interest-payout engine.
     total_interest_paid = Column(Numeric(18, 2), nullable=False, default=0, server_default="0")
     payouts_count = Column(Integer, nullable=False, default=0, server_default="0")
+    # Floor for interest accrual: set to now whenever interest is credited
+    # (scheduled cycle OR on-demand "withdraw interest"). The accrued-since
+    # figure and the next scheduled payout both anchor at max(schedule, this)
+    # so an on-demand interest pull isn't double-counted (client 2026-07-11).
+    last_interest_at = Column(DateTime(timezone=True), nullable=True)
 
-    # 'active' | 'early_pending' | 'matured' | 'withdrawn_early'.
-    # early_pending = trader pressed Withdraw early; awaiting admin
-    # approval. Admin approve → withdrawn_early + credit. Admin reject
-    # → back to active.
+    # 'active' | 'early_pending' | 'principal_pending' | 'matured' |
+    # 'withdrawn_early'. early_pending = trader pressed Withdraw early
+    # (before maturity); principal_pending = trader claimed the matured
+    # principal — both await admin approval on the AI-Powered Staking page.
     state = Column(String(20), nullable=False, default="active")
     # Set when the trader files an early-withdrawal request; cleared
     # when admin approves or rejects.

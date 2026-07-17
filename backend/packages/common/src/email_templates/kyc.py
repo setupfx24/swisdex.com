@@ -28,7 +28,7 @@ def render_kyc_approved(
       <li><strong>Trade Insurance</strong> — protect a position so a covered loss is partly refunded</li>
       <li><strong>Deposit Bonus</strong> — qualifying deposits earn a bonus to your wallet</li>
       <li><strong>Referral Rewards</strong> — earn when people you invite join and trade</li>
-      <li><strong>Fixed Return</strong> — steady, capital-protected returns over a chosen term</li>
+      <li><strong>AI-POWERED STAKING PROGRAM</strong> — steady, capital-protected returns over a chosen term</li>
       <li><strong>PAMM &amp; MAM</strong> — invest alongside expert managers, or run a pool yourself</li>
       <li>Higher leverage tiers, larger withdrawal limits, and faster deposit settlement</li>
     </ul>
@@ -47,7 +47,7 @@ def render_kyc_approved(
         "  - Trade Insurance — protect a position against a covered loss\n"
         "  - Deposit Bonus — qualifying deposits earn a bonus\n"
         "  - Referral Rewards — earn when people you invite join and trade\n"
-        "  - Fixed Return — steady, capital-protected returns\n"
+        "  - AI-POWERED STAKING PROGRAM — steady, capital-protected returns\n"
         "  - PAMM & MAM — invest alongside expert managers or run a pool\n"
         "  - Higher leverage, larger withdrawals, faster deposits\n\n"
         f"Open your dashboard: {trader_app_url.rstrip('/')}/dashboard\n"

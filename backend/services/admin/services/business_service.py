@@ -23,6 +23,11 @@ from packages.common.src.admin_schemas import (
 from dependencies import write_audit_log
 
 
+def _promo_ids():
+    """Sub-select of promotional demo user ids — excluded from admin listings."""
+    return select(User.id).where(User.is_promotional == True)  # noqa: E712
+
+
 async def get_company_ib(db: AsyncSession) -> dict:
     """Return the currently designated company / house IB along with its
     referral link and a referral-count stat. Used by the admin
@@ -210,12 +215,12 @@ async def referral_program_overview(
 
     total_payouts = (await db.execute(
         select(func.count()).select_from(Transaction)
-        .where(Transaction.type == "referral_commission")
+        .where(Transaction.type == "referral_commission", Transaction.user_id.notin_(_promo_ids()))
     )).scalar() or 0
 
     total_referred_users = (await db.execute(
         select(func.count()).select_from(User)
-        .where(User.referred_by_user_id.is_not(None))
+        .where(User.referred_by_user_id.is_not(None), User.is_promotional.isnot(True))
     )).scalar() or 0
 
     # Top 5 referrers by total commission earned.
@@ -225,7 +230,7 @@ async def referral_program_overview(
             func.sum(Transaction.amount).label("earned"),
             func.count().label("payouts"),
         )
-        .where(Transaction.type == "referral_commission")
+        .where(Transaction.type == "referral_commission", Transaction.user_id.notin_(_promo_ids()))
         .group_by(Transaction.user_id)
         .order_by(func.sum(Transaction.amount).desc())
         .limit(5)
@@ -245,7 +250,7 @@ async def referral_program_overview(
     offset = (page - 1) * per_page
     payout_rows = (await db.execute(
         select(Transaction)
-        .where(Transaction.type == "referral_commission")
+        .where(Transaction.type == "referral_commission", Transaction.user_id.notin_(_promo_ids()))
         .order_by(Transaction.created_at.desc())
         .offset(offset).limit(per_page)
     )).scalars().all()
@@ -286,7 +291,7 @@ async def referral_program_overview(
 async def list_ib_applications(
     page: int, per_page: int, status_filter: str | None, db: AsyncSession,
 ):
-    query = select(IBApplication)
+    query = select(IBApplication).where(IBApplication.user_id.notin_(_promo_ids()))
     if status_filter:
         query = query.where(IBApplication.status == status_filter)
 
@@ -406,7 +411,10 @@ async def reject_ib_application(
 
 
 async def list_ib_agents(page: int, per_page: int, db: AsyncSession):
-    query = select(IBProfile).where(IBProfile.is_active == True)
+    query = select(IBProfile).where(
+        IBProfile.is_active == True,  # noqa: E712
+        IBProfile.user_id.notin_(_promo_ids()),
+    )
     count_q = select(func.count()).select_from(query.subquery())
     total = (await db.execute(count_q)).scalar() or 0
 
@@ -769,7 +777,8 @@ async def list_sub_broker_applications(
     page: int, per_page: int, status_filter: str | None, db: AsyncSession,
 ):
     query = select(IBApplication).where(
-        IBApplication.application_data["type"].as_string() == "sub_broker"
+        IBApplication.application_data["type"].as_string() == "sub_broker",
+        IBApplication.user_id.notin_(_promo_ids()),
     )
     if status_filter:
         query = query.where(IBApplication.status == status_filter)
@@ -888,7 +897,9 @@ async def reject_sub_broker(
 
 
 async def list_sub_brokers(page: int, per_page: int, db: AsyncSession):
-    query = select(User).where(User.role == "sub_broker", User.status == "active")
+    query = select(User).where(
+        User.role == "sub_broker", User.status == "active", User.is_promotional.isnot(True),
+    )
     count_q = select(func.count()).select_from(query.subquery())
     total = (await db.execute(count_q)).scalar() or 0
 
@@ -1067,6 +1078,7 @@ async def get_unassigned_users(page: int, per_page: int, db: AsyncSession) -> di
     query = select(User).where(
         User.role.notin_(["ib", "sub_broker", "admin", "super_admin", "employee"]),
         not_(User.id.in_(subq)),
+        User.is_promotional.isnot(True),
     )
     total = (await db.execute(select(func.count()).select_from(query.subquery()))).scalar() or 0
     result = await db.execute(
@@ -1087,10 +1099,14 @@ async def get_ib_referrals(ib_id: uuid.UUID, page: int, per_page: int, db: Async
     """Traders referred by a specific IB with commission data."""
     super_id = await _super_ib_profile_id(db)
     total = (await db.execute(
-        select(func.count(Referral.id)).where(Referral.ib_profile_id == ib_id)
+        select(func.count(Referral.id)).where(
+            Referral.ib_profile_id == ib_id, Referral.referred_id.notin_(_promo_ids())
+        )
     )).scalar() or 0
     refs = await db.execute(
-        select(Referral).where(Referral.ib_profile_id == ib_id)
+        select(Referral).where(
+            Referral.ib_profile_id == ib_id, Referral.referred_id.notin_(_promo_ids())
+        )
         .order_by(Referral.created_at.desc()).offset((page - 1) * per_page).limit(per_page))
     items = []
     for r in refs.scalars().all():

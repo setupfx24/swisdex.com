@@ -197,7 +197,11 @@ async def seed(force: bool = False, ohlc_store=None):
     }
     if _ws_syms:
         before = len(symbols)
-        symbols = {s for s in symbols if _guess_segment(s) == "crypto" or s in _ws_syms}
+        # Keep discovered crypto, and ALWAYS include every configured WS symbol —
+        # even ones with no live tick right now (forex/metals over the weekend).
+        # Otherwise their history never gets seeded and the chart is empty until
+        # the market reopens; InfoWay REST still returns the last (Friday) klines.
+        symbols = {s for s in symbols if _guess_segment(s) == "crypto"} | _ws_syms
         logger.info("Seed scoped to WS symbols + crypto: %d → %d (free-plan rate budget)",
                     before, len(symbols))
 

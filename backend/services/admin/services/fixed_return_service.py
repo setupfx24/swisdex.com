@@ -1,4 +1,4 @@
-"""Admin-side Fixed Return helpers — kept separate from the trader-side
+"""Admin-side AI-POWERED STAKING PROGRAM helpers — kept separate from the trader-side
 gateway service so the admin container doesn't need gateway code on its
 PYTHONPATH. Money-flow + persistence logic is intentionally duplicated
 rather than imported; the duplication is small and the boundary keeps
@@ -242,7 +242,7 @@ async def admin_grant_lock(
             amount=-principal,
             balance_after=user.main_wallet_balance,
             description=(
-                f"Admin-created Fixed Return lock — {tenure['label']} cycle @ "
+                f"Admin-created AI-POWERED STAKING PROGRAM lock — {tenure['label']} cycle @ "
                 f"{rate_pct}% / {lock_months}m{desc_extra}"
             ),
         ))
@@ -253,7 +253,7 @@ async def admin_grant_lock(
             amount=Decimal("0"),
             balance_after=Decimal(str(user.main_wallet_balance or 0)),
             description=(
-                f"Admin-granted Fixed Return — principal ${principal:,.2f}, "
+                f"Admin-granted AI-POWERED STAKING PROGRAM — principal ${principal:,.2f}, "
                 f"{tenure['label']} cycle @ {rate_pct}% / {lock_months}m "
                 f"(broker-funded){desc_extra}"
             ),
@@ -263,11 +263,15 @@ async def admin_grant_lock(
     return _serialize(lock)
 
 
-async def list_pending(db: AsyncSession) -> list[dict]:
+async def list_pending(db: AsyncSession, kind: str = "early") -> list[dict]:
+    """Admin approval queue. kind='early' → early-withdrawal requests (with
+    penalty). kind='principal' → matured principal-withdrawal claims (full
+    principal, no penalty). (client 2026-07-11)"""
+    state = "principal_pending" if kind == "principal" else "early_pending"
     rows = (await db.execute(
         select(FixedReturnLock, User)
         .join(User, User.id == FixedReturnLock.user_id)
-        .where(FixedReturnLock.state == "early_pending")
+        .where(FixedReturnLock.state == state)
         .order_by(FixedReturnLock.early_requested_at.asc())
     )).all()
     fee_pct = await get_float_setting(
@@ -277,12 +281,19 @@ async def list_pending(db: AsyncSession) -> list[dict]:
     for lock, user in rows:
         principal = Decimal(str(lock.principal or 0))
         total_interest = Decimal(str(lock.total_interest_paid or 0))
-        fee = (principal * Decimal(str(fee_pct)) / Decimal("100")).quantize(Decimal("0.01"))
-        projected = (principal - fee - total_interest).quantize(Decimal("0.01"))
-        if projected < 0:
-            projected = Decimal("0")
+        if kind == "principal":
+            # Matured: user gets the FULL principal back, no penalty / clawback.
+            projected = principal
+            fee = Decimal("0")
+        else:
+            fee = (principal * Decimal(str(fee_pct)) / Decimal("100")).quantize(Decimal("0.01"))
+            projected = (principal - fee - total_interest).quantize(Decimal("0.01"))
+            if projected < 0:
+                projected = Decimal("0")
         out.append({
             **_serialize(lock),
+            "kind": kind,
+            "user_id": str(user.id),
             "user_email": user.email,
             "user_name": (
                 " ".join(filter(None, [user.first_name, user.last_name])).strip()
@@ -290,6 +301,9 @@ async def list_pending(db: AsyncSession) -> list[dict]:
             ),
             "projected_payout": float(projected),
             "projected_fee": float(fee),
+            "early_requested_at": (
+                lock.early_requested_at.isoformat() if lock.early_requested_at else None
+            ),
         })
     return out
 
@@ -302,7 +316,7 @@ async def approve(lock_id: UUID, db: AsyncSession) -> dict:
     )).scalar_one_or_none()
     if lock is None:
         raise HTTPException(status_code=404, detail="Lock not found")
-    if lock.state != "early_pending":
+    if lock.state not in ("early_pending", "principal_pending"):
         raise HTTPException(
             status_code=409,
             detail=f"Lock is {lock.state}, not waiting on approval",
@@ -316,6 +330,33 @@ async def approve(lock_id: UUID, db: AsyncSession) -> dict:
 
     principal = Decimal(str(lock.principal or 0))
     total_interest = Decimal(str(lock.total_interest_paid or 0))
+    now = datetime.now(timezone.utc)
+
+    if lock.state == "principal_pending":
+        # Matured principal claim — pay the FULL principal, no penalty.
+        payout = principal
+        user.main_wallet_balance = Decimal(str(user.main_wallet_balance or 0)) + payout
+        lock.state = "matured"
+        lock.payout = payout
+        lock.fee_paid = Decimal("0")
+        lock.settled_at = now
+        lock.early_requested_at = None
+        lock.next_payout_at = None
+        db.add(Transaction(
+            user_id=lock.user_id,
+            type="fixed_return_matured",
+            amount=payout,
+            balance_after=user.main_wallet_balance,
+            description=(
+                f"AI-POWERED STAKING PROGRAM matured — principal returned (approved) "
+                f"(interest paid in {lock.payouts_count} cycles: ${total_interest:,.2f})"
+            ),
+        ))
+        await db.commit()
+        await db.refresh(lock)
+        return _serialize(lock)
+
+    # Early withdrawal — penalty + interest claw-back.
     fee_pct = await get_float_setting(
         "fixed_return_early_withdrawal_fee_pct", DEFAULT_FEE_PCT,
     )
@@ -324,7 +365,6 @@ async def approve(lock_id: UUID, db: AsyncSession) -> dict:
     if payout < 0:
         payout = Decimal("0")
 
-    now = datetime.now(timezone.utc)
     user.main_wallet_balance = Decimal(str(user.main_wallet_balance or 0)) + payout
     lock.state = "withdrawn_early"
     lock.payout = payout
@@ -339,7 +379,7 @@ async def approve(lock_id: UUID, db: AsyncSession) -> dict:
         amount=payout,
         balance_after=user.main_wallet_balance,
         description=(
-            f"Fixed Return early withdrawal (approved) — penalty ${fee:,.2f} + "
+            f"AI-POWERED STAKING PROGRAM early withdrawal (approved) — penalty ${fee:,.2f} + "
             f"interest claw-back ${total_interest:,.2f}"
         ),
     ))
@@ -356,16 +396,38 @@ async def reject(lock_id: UUID, db: AsyncSession, *, reason: str | None = None) 
     )).scalar_one_or_none()
     if lock is None:
         raise HTTPException(status_code=404, detail="Lock not found")
-    if lock.state != "early_pending":
+    if lock.state not in ("early_pending", "principal_pending"):
         raise HTTPException(
             status_code=409,
             detail=f"Lock is {lock.state}, not waiting on approval",
         )
 
-    # Re-arm the schedule. Gateway engine filters out NULL next_payout_at
-    # rows from the accrual sweep, so we MUST set a real date here or the
-    # lock will silently stop earning interest after a rejection.
     now = datetime.now(timezone.utc)
+    is_principal = lock.state == "principal_pending"
+    lock.early_requested_at = None
+
+    if is_principal:
+        # Matured principal claim rejected — lock goes back to 'active'.
+        # matures_at is in the past so it renders as Matured/claimable again;
+        # no interest schedule to re-arm (already at/after maturity).
+        lock.state = "active"
+        lock.next_payout_at = None
+        db.add(Transaction(
+            user_id=lock.user_id,
+            type="fixed_return_principal_rejected",
+            amount=Decimal("0"),
+            balance_after=Decimal("0"),
+            description=(
+                "AI-POWERED STAKING PROGRAM principal-withdrawal request rejected by admin"
+                + (f": {reason}" if reason else "")
+            ),
+        ))
+        await db.commit()
+        await db.refresh(lock)
+        return _serialize(lock)
+
+    # Early-withdrawal rejection — re-arm the interest schedule so the lock
+    # keeps earning (engine skips NULL next_payout_at rows).
     matures_at = lock.matures_at
     if matures_at and matures_at.tzinfo is None:
         matures_at = matures_at.replace(tzinfo=timezone.utc)
@@ -378,7 +440,6 @@ async def reject(lock_id: UUID, db: AsyncSession, *, reason: str | None = None) 
         next_payout = matures_at
 
     lock.state = "active"
-    lock.early_requested_at = None
     lock.next_payout_at = next_payout
 
     db.add(Transaction(
@@ -387,7 +448,7 @@ async def reject(lock_id: UUID, db: AsyncSession, *, reason: str | None = None) 
         amount=Decimal("0"),
         balance_after=Decimal("0"),
         description=(
-            f"Fixed Return early-withdrawal request rejected by admin"
+            f"AI-POWERED STAKING PROGRAM early-withdrawal request rejected by admin"
             + (f": {reason}" if reason else "")
         ),
     ))

@@ -6,6 +6,51 @@ import { Loader2, Save, Plus, Trash2, Check, X, Clock } from 'lucide-react';
 import { adminApi } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
+// Shared in-app approve/reject confirmation modal (replaces window.confirm /
+// window.prompt on the withdrawal-approval queues — client 2026-07-11).
+function ApprovalModal({
+  open, title, body, action, reason, onReason, onConfirm, onClose,
+}: {
+  open: boolean; title: string; body: React.ReactNode;
+  action: 'approve' | 'reject'; reason: string;
+  onReason: (v: string) => void; onConfirm: () => void; onClose: () => void;
+}) {
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-[130] flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative w-full max-w-sm rounded-xl border border-border-primary bg-bg-secondary p-5 shadow-modal space-y-3">
+        <div className="flex items-start justify-between gap-2">
+          <h3 className="text-sm font-bold text-text-primary">{title}</h3>
+          <button onClick={onClose} className="p-1 -m-1 text-text-tertiary hover:text-text-primary"><X size={16} /></button>
+        </div>
+        <div className="text-xs text-text-secondary leading-relaxed">{body}</div>
+        {action === 'reject' && (
+          <input
+            autoFocus
+            value={reason}
+            onChange={(e) => onReason(e.target.value)}
+            placeholder="Reason (optional — shown to the user)"
+            className="w-full text-xs py-2 px-2 bg-bg-input border border-border-primary rounded-md text-text-primary placeholder:text-text-tertiary"
+          />
+        )}
+        <div className="flex justify-end gap-2 pt-1">
+          <button onClick={onClose} className="px-4 py-2 text-xs font-medium rounded-md border border-border-primary text-text-secondary hover:bg-bg-hover">Cancel</button>
+          <button
+            onClick={onConfirm}
+            className={cn(
+              'px-4 py-2 text-xs font-bold rounded-md text-white',
+              action === 'approve' ? 'bg-buy hover:bg-buy-light' : 'bg-danger hover:bg-danger/90',
+            )}
+          >
+            {action === 'approve' ? 'Approve' : 'Reject'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 interface Tier { label: string; min_amount: number }
 interface Tenure { label: string; days: number }
 interface RateConfig {
@@ -42,6 +87,10 @@ export default function FixedReturnConfigPage() {
   const [cfg, setCfg] = useState<RateConfig>(FALLBACK);
   const [feePct, setFeePct] = useState<number>(5);
   const [lockMonths, setLockMonths] = useState<number>(24);
+  // Upgrade top-up % (client 2026-07-11): when a holder upgrades to a
+  // higher plan, this % of the current principal is auto-debited from their
+  // wallet and added to the new (bigger) principal.
+  const [upgradeTopupPct, setUpgradeTopupPct] = useState<number>(25);
   // Day-of-month payout window. Defaults match the client's banking
   // cycle (25th → 30th). Setting both to 1/31 disables the gate.
   const [payoutDayStart, setPayoutDayStart] = useState<number>(25);
@@ -49,6 +98,12 @@ export default function FixedReturnConfigPage() {
   // AI-Staking referral commission % (referrer chooses which one applies).
   const [refPrincipalPct, setRefPrincipalPct] = useState<number>(0);
   const [refInterestPct, setRefInterestPct] = useState<number>(0);
+  // Pre-launch offer (client 2026-07-14): an alternate matrix shown behind a
+  // "Pre launch" button on the trader page. While enabled it is ALSO the
+  // effective rate for new locks (what users see is what they get).
+  const [preEnabled, setPreEnabled] = useState(false);
+  const [preHeadline, setPreHeadline] = useState('Pre-launch offer — first 100 clients');
+  const [preMatrix, setPreMatrix] = useState<number[][]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
@@ -64,6 +119,7 @@ export default function FixedReturnConfigPage() {
       const dayEnd = list.find((s) => s.key === 'fixed_return_payout_day_end')?.value;
       const refPrin = list.find((s) => s.key === 'fr_referral_principal_pct')?.value;
       const refInt = list.find((s) => s.key === 'fr_referral_interest_pct')?.value;
+      const upTopup = list.find((s) => s.key === 'fixed_return_upgrade_topup_pct')?.value;
       if (rates && Array.isArray(rates.tiers)) {
         setCfg(normalize(rates));
       }
@@ -85,8 +141,15 @@ export default function FixedReturnConfigPage() {
       }
       if (refPrin != null) { const n = Number(refPrin); if (Number.isFinite(n) && n >= 0) setRefPrincipalPct(n); }
       if (refInt != null) { const n = Number(refInt); if (Number.isFinite(n) && n >= 0) setRefInterestPct(n); }
+      if (upTopup != null) { const n = Number(upTopup); if (Number.isFinite(n) && n >= 0) setUpgradeTopupPct(n); }
+      const pre = list.find((s) => s.key === 'fixed_return_prelaunch')?.value;
+      if (pre && typeof pre === 'object') {
+        setPreEnabled(!!pre.enabled);
+        if (typeof pre.headline === 'string' && pre.headline.trim()) setPreHeadline(pre.headline);
+        if (Array.isArray(pre.rate_matrix_pct)) setPreMatrix(pre.rate_matrix_pct);
+      }
     } catch (e: any) {
-      toast.error(e?.message || 'Failed to load AI Powered Staking config');
+      toast.error(e?.message || 'Failed to load AI-POWERED STAKING PROGRAM config');
     } finally {
       setLoading(false);
     }
@@ -113,6 +176,22 @@ export default function FixedReturnConfigPage() {
       m[ti][ci] = value;
       return { ...prev, rate_matrix_pct: m };
     });
+  };
+
+  const updatePreCell = (ti: number, ci: number, value: number) => {
+    setPreMatrix((prev) => {
+      const m = prev.map((row) => (Array.isArray(row) ? row.slice() : []));
+      while (m.length <= ti) m.push([]);
+      m[ti][ci] = value;
+      return m;
+    });
+  };
+
+  // Pre-launch matrix normalized to the CURRENT tier/tenure grid (cells the
+  // admin hasn't typed yet default to 0 and render empty-ish).
+  const preCell = (ti: number, ci: number): number => {
+    const v = Number(preMatrix[ti]?.[ci]);
+    return Number.isFinite(v) ? v : 0;
   };
 
   const updateTier = (ci: number, field: keyof Tier, value: string) => {
@@ -202,6 +281,10 @@ export default function FixedReturnConfigPage() {
       toast.error('Payout window start day must be ≤ end day');
       return;
     }
+    if (preEnabled && !cfg.tenures.some((_, ti) => cfg.tiers.some((_, ci) => preCell(ti, ci) > 0))) {
+      toast.error('Pre-launch offer is enabled but its matrix is all zeros — fill the rates first');
+      return;
+    }
     setSaving(true);
     try {
       await adminApi.put('/settings', {
@@ -213,9 +296,17 @@ export default function FixedReturnConfigPage() {
           fixed_return_payout_day_end: payoutDayEnd,
           fr_referral_principal_pct: refPrincipalPct,
           fr_referral_interest_pct: refInterestPct,
+          fixed_return_upgrade_topup_pct: upgradeTopupPct,
+          fixed_return_prelaunch: {
+            enabled: preEnabled,
+            headline: preHeadline.trim() || 'Pre-launch offer',
+            // Saved normalized to the CURRENT tier/tenure grid so the gateway's
+            // dimension check always passes.
+            rate_matrix_pct: cfg.tenures.map((_, ti) => cfg.tiers.map((_, ci) => preCell(ti, ci))),
+          },
         },
       });
-      toast.success('AI Powered Staking config saved');
+      toast.success('AI-POWERED STAKING PROGRAM config saved');
     } catch (e: any) {
       toast.error(e?.message || 'Save failed');
     } finally {
@@ -235,7 +326,7 @@ export default function FixedReturnConfigPage() {
     <div className="p-6 space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-lg font-semibold text-text-primary">AI Powered Staking — Rate Matrix</h1>
+          <h1 className="text-lg font-semibold text-text-primary">AI-POWERED STAKING PROGRAM — Rate Matrix</h1>
           <p className="text-xxs text-text-tertiary mt-0.5 max-w-3xl">
             Every lock runs for the full <strong>Lock period</strong> below. <strong>Tenure</strong> is the
             payout cadence — the user receives <em>principal × rate%</em> every cycle (Month / Quarter / etc.)
@@ -293,6 +384,29 @@ export default function FixedReturnConfigPage() {
           <p className="text-[10px] text-text-tertiary max-w-xs">
             On early withdrawal: <strong>principal × (1 − fee%) − interest paid so far</strong>.
             Interest payments to date claw back from the returned principal.
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-1">
+          <label className="text-xs font-medium text-text-secondary">
+            Upgrade top-up (% of current principal)
+          </label>
+          <div className="flex items-center gap-2">
+            <input
+              type="number"
+              min={0}
+              max={100}
+              step="0.01"
+              value={upgradeTopupPct}
+              onChange={(e) => setUpgradeTopupPct(parseFloat(e.target.value) || 0)}
+              className="w-24 px-2 py-1 text-xs bg-bg-input border border-border-primary rounded font-mono tabular-nums text-text-primary"
+            />
+            <span className="text-xxs text-text-tertiary">%</span>
+          </div>
+          <p className="text-[10px] text-text-tertiary max-w-xs">
+            When a holder upgrades to a higher plan: this % of their current principal is
+            <strong> auto-debited from their wallet</strong> and added to the new (bigger) principal.
+            Their elapsed interest so far is credited to the wallet first.
           </p>
         </div>
 
@@ -472,8 +586,193 @@ export default function FixedReturnConfigPage() {
         </table>
       </div>
 
+      {/* Pre-launch offer (client 2026-07-14): alternate matrix shown behind a
+          "Pre launch" button on the trader page. While ENABLED it is also the
+          EFFECTIVE rate for new locks; per-user overrides still win. */}
+      <div className="bg-bg-secondary border border-border-primary rounded-md p-4 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-semibold text-text-primary">Pre-Launch Offer</h2>
+            <p className="text-[10px] text-text-tertiary max-w-2xl mt-0.5">
+              While enabled, traders see a <strong>Pre launch</strong> button on the AI-Staking page
+              with this sheet, and <strong>new locks are priced off THESE rates</strong> (the standard
+              matrix above stays visible as the &quot;after launch&quot; comparison). Disable to end the offer.
+            </p>
+          </div>
+          <label className="inline-flex items-center gap-2 text-xs text-text-secondary cursor-pointer">
+            <input
+              type="checkbox"
+              checked={preEnabled}
+              onChange={(e) => setPreEnabled(e.target.checked)}
+              className="accent-buy w-4 h-4"
+            />
+            Enabled
+          </label>
+        </div>
+        <div className="flex flex-col gap-1 max-w-md">
+          <label className="text-xs font-medium text-text-secondary">Headline (shown to traders)</label>
+          <input
+            value={preHeadline}
+            onChange={(e) => setPreHeadline(e.target.value)}
+            className="px-2 py-1 text-xs bg-bg-input border border-border-primary rounded text-text-primary"
+            placeholder="Pre-launch offer — first 100 clients"
+          />
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[720px]">
+            <thead>
+              <tr className="border-b border-border-primary bg-bg-tertiary/40">
+                <th className="text-left px-3 py-2 text-xxs font-medium text-text-tertiary uppercase tracking-wide">Tenure</th>
+                {cfg.tiers.map((t, ci) => (
+                  <th key={ci} className="px-3 py-2 text-xxs font-medium text-text-tertiary uppercase tracking-wide text-center">
+                    {t.label}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {cfg.tenures.map((tn, ti) => (
+                <tr key={ti} className="border-b border-border-primary/50 hover:bg-bg-hover/30">
+                  <td className="px-3 py-2 text-xs text-text-primary">{tn.label}</td>
+                  {cfg.tiers.map((_, ci) => (
+                    <td key={ci} className="px-3 py-2 text-center">
+                      <input
+                        type="number"
+                        step="0.1"
+                        min={0}
+                        value={preCell(ti, ci)}
+                        onChange={(e) => updatePreCell(ti, ci, parseFloat(e.target.value) || 0)}
+                        className="w-16 px-2 py-1 text-xs bg-bg-input border border-border-primary rounded font-mono tabular-nums text-text-primary text-center"
+                      />
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
       <PendingEarlyWithdrawals />
+      <PendingPrincipalWithdrawals />
     </div>
+  );
+}
+
+
+// ─── Principal-withdrawal approval queue (matured claims) ────────────
+
+function PendingPrincipalWithdrawals() {
+  const [rows, setRows] = useState<PendingRow[] | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [modal, setModal] = useState<{ row: PendingRow; action: 'approve' | 'reject' } | null>(null);
+  const [reason, setReason] = useState('');
+
+  const load = useCallback(async () => {
+    try {
+      const data = await adminApi.get<PendingRow[]>('/fixed-return/pending', { kind: 'principal' });
+      setRows(Array.isArray(data) ? data : []);
+    } catch (e: any) {
+      toast.error(e?.message || 'Failed to load principal-withdrawal queue');
+      setRows([]);
+    }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const runAction = async () => {
+    if (!modal) return;
+    const { row, action } = modal;
+    setBusyId(row.id);
+    setModal(null);
+    try {
+      if (action === 'approve') {
+        await adminApi.post(`/fixed-return/${row.id}/approve`, {});
+        toast.success('Approved — principal credited to user\'s main wallet');
+      } else {
+        await adminApi.post(`/fixed-return/${row.id}/reject`, { reason: reason.trim() || null });
+        toast.success('Rejected — plan stays matured (user can claim again)');
+      }
+      load();
+    } catch (e: any) {
+      toast.error(e?.message || `${action} failed`);
+    } finally { setBusyId(null); }
+  };
+  const approve = (r: PendingRow) => { setReason(''); setModal({ row: r, action: 'approve' }); };
+  const reject = (r: PendingRow) => { setReason(''); setModal({ row: r, action: 'reject' }); };
+
+  return (
+    <>
+    <ApprovalModal
+      open={!!modal}
+      action={modal?.action ?? 'approve'}
+      reason={reason}
+      onReason={setReason}
+      onClose={() => setModal(null)}
+      onConfirm={runAction}
+      title={modal?.action === 'approve' ? 'Approve principal withdrawal' : 'Reject principal withdrawal'}
+      body={modal && (
+        modal.action === 'approve'
+          ? <>User <strong className="text-text-primary">{modal.row.user_email}</strong> will receive their full principal of <strong className="text-text-primary">${modal.row.principal.toFixed(2)}</strong> in their main wallet.</>
+          : <>Reject the principal-withdrawal request for <strong className="text-text-primary">{modal.row.user_email}</strong>? The plan stays matured and the user can claim again.</>
+      )}
+    />
+    <div className="bg-bg-secondary border border-border-primary rounded-md">
+      <div className="px-4 py-3 border-b border-border-primary flex items-center gap-2">
+        <Clock size={14} className="text-buy" />
+        <h2 className="text-sm font-semibold text-text-primary">Principal-withdrawal approvals</h2>
+        <span className="text-xxs text-text-tertiary ml-2">
+          {rows == null ? '…' : `${rows.length} pending`}
+        </span>
+        <button onClick={load} className="ml-auto text-xxs text-text-secondary hover:text-text-primary">Refresh</button>
+      </div>
+      <div className="overflow-x-auto">
+        {rows == null ? (
+          <div className="px-4 py-6 text-center"><Loader2 size={16} className="animate-spin text-text-tertiary inline-block" /></div>
+        ) : rows.length === 0 ? (
+          <div className="px-4 py-8 text-center text-xs text-text-tertiary">No principal-withdrawal requests waiting.</div>
+        ) : (
+          <table className="w-full min-w-[640px]">
+            <thead>
+              <tr className="border-b border-border-primary bg-bg-tertiary/40">
+                <th className="text-left px-4 py-2.5 text-xxs font-medium text-text-tertiary uppercase tracking-wide">User</th>
+                <th className="text-left px-4 py-2.5 text-xxs font-medium text-text-tertiary uppercase tracking-wide">Plan</th>
+                <th className="text-right px-4 py-2.5 text-xxs font-medium text-text-tertiary uppercase tracking-wide">Principal payout</th>
+                <th className="text-left px-4 py-2.5 text-xxs font-medium text-text-tertiary uppercase tracking-wide">Requested</th>
+                <th className="text-right px-4 py-2.5 text-xxs font-medium text-text-tertiary uppercase tracking-wide">Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.id} className="border-b border-border-primary/50 last:border-0 hover:bg-bg-hover/30">
+                  <td className="px-4 py-2.5">
+                    <div className="text-xs text-text-primary truncate max-w-[220px]">{r.user_name || '—'}</div>
+                    <div className="text-xxs text-text-tertiary truncate max-w-[220px]">{r.user_email}</div>
+                  </td>
+                  <td className="px-4 py-2.5 text-xxs text-text-secondary">{r.tenure_label} · {r.rate_pct}%/mo</td>
+                  <td className="px-4 py-2.5 text-right text-xs font-mono tabular-nums text-text-primary font-semibold">${r.projected_payout.toFixed(2)}</td>
+                  <td className="px-4 py-2.5 text-xxs text-text-secondary whitespace-nowrap">
+                    {r.early_requested_at ? new Date(r.early_requested_at).toLocaleString() : '—'}
+                  </td>
+                  <td className="px-4 py-2.5 text-right">
+                    <div className="inline-flex items-center gap-1">
+                      <button onClick={() => approve(r)} disabled={busyId === r.id}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 text-xxs text-white bg-buy rounded hover:bg-buy-light disabled:opacity-50">
+                        <Check size={12} /> Approve
+                      </button>
+                      <button onClick={() => reject(r)} disabled={busyId === r.id}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 text-xxs text-text-secondary border border-border-primary rounded hover:bg-bg-hover disabled:opacity-50">
+                        <X size={12} /> Reject
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+    </>
   );
 }
 
@@ -499,6 +798,8 @@ interface PendingRow {
 function PendingEarlyWithdrawals() {
   const [rows, setRows] = useState<PendingRow[] | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [modal, setModal] = useState<{ row: PendingRow; action: 'approve' | 'reject' } | null>(null);
+  const [reason, setReason] = useState('');
 
   const load = useCallback(async () => {
     try {
@@ -512,41 +813,47 @@ function PendingEarlyWithdrawals() {
 
   useEffect(() => { load(); }, [load]);
 
-  const approve = async (r: PendingRow) => {
-    if (!window.confirm(
-      `Approve early withdrawal for ${r.user_email}?\n\nUser will receive $${r.projected_payout.toFixed(2)} (principal $${r.principal.toFixed(2)} − fee $${r.projected_fee.toFixed(2)} − interest claw-back $${r.total_interest_paid.toFixed(2)}).`,
-    )) return;
-    setBusyId(r.id);
-    try {
-      await adminApi.post(`/fixed-return/${r.id}/approve`, {});
-      toast.success('Approved — funds credited to user\'s main wallet');
-      load();
-    } catch (e: any) {
-      toast.error(e?.message || 'Approve failed');
-    } finally {
-      setBusyId(null);
-    }
-  };
+  const openModal = (row: PendingRow, action: 'approve' | 'reject') => { setReason(''); setModal({ row, action }); };
 
-  const reject = async (r: PendingRow) => {
-    const reason = window.prompt(
-      `Reject early withdrawal for ${r.user_email}?\nOptional reason (shown on the user's transaction log):`,
-      '',
-    );
-    if (reason === null) return;
-    setBusyId(r.id);
+  const runAction = async () => {
+    if (!modal) return;
+    const { row, action } = modal;
+    setBusyId(row.id);
+    setModal(null);
     try {
-      await adminApi.post(`/fixed-return/${r.id}/reject`, { reason: reason || null });
-      toast.success('Rejected — lock reverted to active');
+      if (action === 'approve') {
+        await adminApi.post(`/fixed-return/${row.id}/approve`, {});
+        toast.success('Approved — funds credited to user\'s main wallet');
+      } else {
+        await adminApi.post(`/fixed-return/${row.id}/reject`, { reason: reason.trim() || null });
+        toast.success('Rejected — lock reverted to active');
+      }
       load();
     } catch (e: any) {
-      toast.error(e?.message || 'Reject failed');
+      toast.error(e?.message || `${action} failed`);
     } finally {
       setBusyId(null);
     }
   };
+  const approve = (r: PendingRow) => openModal(r, 'approve');
+  const reject = (r: PendingRow) => openModal(r, 'reject');
 
   return (
+    <>
+    <ApprovalModal
+      open={!!modal}
+      action={modal?.action ?? 'approve'}
+      reason={reason}
+      onReason={setReason}
+      onClose={() => setModal(null)}
+      onConfirm={runAction}
+      title={modal?.action === 'approve' ? 'Approve early withdrawal' : 'Reject early withdrawal'}
+      body={modal && (
+        modal.action === 'approve'
+          ? <>User <strong className="text-text-primary">{modal.row.user_email}</strong> will receive <strong className="text-text-primary">${modal.row.projected_payout.toFixed(2)}</strong> (principal ${modal.row.principal.toFixed(2)} − fee ${modal.row.projected_fee.toFixed(2)} − interest claw-back ${modal.row.total_interest_paid.toFixed(2)}).</>
+          : <>Reject the early-withdrawal request for <strong className="text-text-primary">{modal.row.user_email}</strong>? The lock reverts to active.</>
+      )}
+    />
     <div className="bg-bg-secondary border border-border-primary rounded-md">
       <div className="px-4 py-3 border-b border-border-primary flex items-center gap-2">
         <Clock size={14} className="text-amber-400" />
@@ -628,5 +935,6 @@ function PendingEarlyWithdrawals() {
         )}
       </div>
     </div>
+    </>
   );
 }

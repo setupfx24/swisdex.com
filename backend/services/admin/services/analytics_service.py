@@ -105,25 +105,38 @@ async def analytics_dashboard(
     if start_date is not None:
         custom_range = await _revenue_stats(db, start_date, end_date)
 
+    # Promotional demo accounts are excluded from every admin analytics number.
+    promo_ids = select(User.id).where(User.is_promotional == True)  # noqa: E712
+
     dep_q = await db.execute(
         select(func.coalesce(func.sum(Deposit.amount), 0)).where(
-            Deposit.status.in_(["approved", "auto_approved"])
+            Deposit.status.in_(["approved", "auto_approved"]),
+            Deposit.user_id.notin_(promo_ids),
         )
     )
     total_deposits = float(dep_q.scalar() or 0)
 
     wd_q = await db.execute(
         select(func.coalesce(func.sum(Withdrawal.amount), 0)).where(
-            Withdrawal.status.in_(["approved", "completed"])
+            Withdrawal.status.in_(["approved", "completed"]),
+            Withdrawal.user_id.notin_(promo_ids),
         )
     )
     total_withdrawals = float(wd_q.scalar() or 0)
 
     open_pos_q = await db.execute(
-        select(func.count(Position.id)).where(Position.status == PositionStatus.OPEN.value)
+        select(func.count(Position.id))
+        .select_from(Position)
+        .join(TradingAccount, TradingAccount.id == Position.account_id)
+        .where(Position.status == PositionStatus.OPEN.value, TradingAccount.is_promotional.isnot(True))
     )
 
-    closed_trades_q = await db.execute(select(func.count(TradeHistory.id)))
+    closed_trades_q = await db.execute(
+        select(func.count(TradeHistory.id))
+        .select_from(TradeHistory)
+        .join(TradingAccount, TradingAccount.id == TradeHistory.account_id)
+        .where(TradingAccount.is_promotional.isnot(True))
+    )
 
     # Admin commission earned from all sources (PAMM performance fee, copy-trade, etc.)
     admin_comm_all_q = await db.execute(
@@ -155,23 +168,34 @@ async def analytics_dashboard(
         select(func.count(MasterAccount.id)).where(MasterAccount.status.in_(["approved", "active"]))
     )
 
+    promo_ib_ids = select(IBProfile.id).where(IBProfile.user_id.in_(promo_ids))
+
     ib_count_q = await db.execute(
-        select(func.count(IBProfile.id)).where(IBProfile.is_active == True)
+        select(func.count(IBProfile.id)).where(
+            IBProfile.is_active == True,  # noqa: E712
+            IBProfile.user_id.notin_(promo_ids),
+        )
     )
     total_ibs = ib_count_q.scalar() or 0
 
     sub_broker_q = await db.execute(
-        select(func.count(User.id)).where(User.role == "sub_broker", User.status == "active")
+        select(func.count(User.id)).where(
+            User.role == "sub_broker", User.status == "active", User.is_promotional.isnot(True),
+        )
     )
     total_sub_brokers = sub_broker_q.scalar() or 0
 
     ib_commission_q = await db.execute(
-        select(func.coalesce(func.sum(IBCommission.amount), 0))
+        select(func.coalesce(func.sum(IBCommission.amount), 0)).where(
+            IBCommission.ib_id.notin_(promo_ib_ids)
+        )
     )
     total_ib_commission = float(ib_commission_q.scalar() or 0)
 
     ib_pending_q = await db.execute(
-        select(func.coalesce(func.sum(IBCommission.amount), 0)).where(IBCommission.status == "pending")
+        select(func.coalesce(func.sum(IBCommission.amount), 0)).where(
+            IBCommission.status == "pending", IBCommission.ib_id.notin_(promo_ib_ids),
+        )
     )
     ib_pending_commission = float(ib_pending_q.scalar() or 0)
 
@@ -265,7 +289,7 @@ async def finance_overview(db: AsyncSession, start_date=None, end_date=None) -> 
         + insurance fees
         − user trading PROFIT, − insurance payouts, − IB commission,
         − referral commission
-    Fixed Return is reported separately (NOT part of Net P&L).
+    AI-POWERED STAKING PROGRAM is reported separately (NOT part of Net P&L).
 
     start_date/end_date (optional UTC datetimes) restrict the FLOW figures
     (P&L sources, deposits, withdrawals, pending, fixed-return collected) to
@@ -396,6 +420,15 @@ async def finance_overview(db: AsyncSession, start_date=None, end_date=None) -> 
     pdep_methods, pdep_total = await _by_method(Deposit, ["pending"])
     pwd_methods, pwd_total = await _by_method(Withdrawal, ["pending"])
 
+    # ── Total withdrawable across all users (client 2026-07-11) ───────
+    # The real cash sitting in every user's main wallet — what the whole
+    # user base could withdraw right now (bonus + account credit are NOT
+    # withdrawable, so they're excluded). Not date-filtered: it's a live
+    # balance snapshot, not a period flow. Promo + demo users excluded.
+    total_withdrawable = float((await db.execute(
+        _xu(select(func.coalesce(func.sum(User.main_wallet_balance), 0)), User.id)
+    )).scalar() or 0)
+
     # ── Net credit (non-withdrawable tradable funds) ──────────────────
     bonus_wallet = float((await db.execute(
         _xu(select(func.coalesce(func.sum(User.main_wallet_bonus), 0)), User.id)
@@ -412,7 +445,7 @@ async def finance_overview(db: AsyncSession, start_date=None, end_date=None) -> 
         ), Transaction.account_id)
     )).scalar() or 0))
 
-    # ── Fixed Return (separate from P&L) ──────────────────────────────
+    # ── AI-POWERED STAKING PROGRAM (separate from P&L) ──────────────────────────────
     # When a date window is given, scope to locks OPENED in that window
     # ("collected in this period"); otherwise all currently-active locks.
     active_locks = (await db.execute(
@@ -538,9 +571,9 @@ async def finance_overview(db: AsyncSession, start_date=None, end_date=None) -> 
     # the full commissions/bonuses (those are normal business cost, not
     # promotional). These are deliberate expense records → summed as-is.
     _PE_LABELS = {
-        "fr_referral_extra": "Fixed Return referral — extra %",
-        "extra_fr_interest": "Extra Fixed Return interest",
-        "fr_referral_bonus": "Fixed Return referral bonus",
+        "fr_referral_extra": "AI-POWERED STAKING PROGRAM referral — extra %",
+        "extra_fr_interest": "Extra AI-POWERED STAKING PROGRAM interest",
+        "fr_referral_bonus": "AI-POWERED STAKING PROGRAM referral bonus",
         "custom_benefit": "Custom promotional benefit",
         "manual": "Manual entries",
     }
@@ -588,6 +621,7 @@ async def finance_overview(db: AsyncSession, start_date=None, end_date=None) -> 
         },
         "pending_deposits": {"total": pdep_total, "by_method": pdep_methods},
         "pending_withdrawals": {"total": pwd_total, "by_method": pwd_methods},
+        "total_withdrawable": {"total": round(total_withdrawable, 2)},
     }
 
 
@@ -683,6 +717,23 @@ async def finance_overview_drill(
                 "email": info.get("email"),
                 "amount": round(float(amt or 0), 2),
                 "count": int(cnt or 0),
+            })
+
+    elif section == "total_withdrawable":
+        # Per-user main-wallet balance (the withdrawable cash). Biggest first.
+        rows = (await db.execute(
+            _xu(select(User.id, func.coalesce(User.main_wallet_balance, 0))
+                .where(func.coalesce(User.main_wallet_balance, 0) != 0), User.id)
+        )).all()
+        umap = await _user_label_map(db, [r[0] for r in rows])
+        for uid, bal in rows:
+            info = umap.get(uid, {})
+            users.append({
+                "user_id": str(uid) if uid else None,
+                "name": info.get("name", "—"),
+                "email": info.get("email"),
+                "amount": round(float(bal or 0), 2),
+                "count": 1,
             })
 
     elif section == "net_credit":

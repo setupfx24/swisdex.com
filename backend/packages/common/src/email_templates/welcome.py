@@ -95,8 +95,8 @@ def render_welcome(
             "Qualifying deposits can earn a bonus credited straight to your wallet, so you can size up from day one.",
         )
         + _bullet(
-            "Fixed Return",
-            "Park capital in the Fixed Return product for steady, capital-protected returns over a chosen term.",
+            "AI-POWERED STAKING PROGRAM",
+            "Park capital in the AI-POWERED STAKING PROGRAM product for steady, capital-protected returns over a chosen term.",
         )
         + _bullet(
             "Introducing Broker (IB)",
@@ -202,7 +202,7 @@ def render_welcome(
         "  • Referral Rewards — earn when the people you invite join and start trading.\n"
         "  • Trade Insurance — insure a position so a covered loss is partly refunded.\n"
         "  • Deposit Bonus — qualifying deposits earn a bonus credited to your wallet.\n"
-        "  • Fixed Return — steady, capital-protected returns over a chosen term.\n"
+        "  • AI-POWERED STAKING PROGRAM — steady, capital-protected returns over a chosen term.\n"
         "  • Introducing Broker (IB) — earn per-lot commissions on the clients you bring in.\n"
         "  • PAMM & MAM Investing — invest alongside expert money managers, or run a pool yourself.\n\n"
     )

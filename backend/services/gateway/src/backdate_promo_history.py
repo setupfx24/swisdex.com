@@ -4,7 +4,7 @@ timestamped on seed day.
 
 Spreads, for amardeepsonar2001@gmail.com:
   - Transactions (deposit / FR lock / transfers / insurance fee) across the window
-  - the Fixed Return lock's locked_at + matures_at (payout stays in the future,
+  - the AI-POWERED STAKING PROGRAM lock's locked_at + matures_at (payout stays in the future,
     so the interest engine does NOT do a catch-up run)
   - CLOSED positions + their TradeHistory rows, spaced through the window
   - the insurance policy's activated_at
@@ -89,7 +89,7 @@ async def run(execute: bool):
                         (tx.description or "")[:40], when.date())
             tx.created_at = when
 
-        # 2. Fixed Return locks — shift locked_at + matures_at back; leave
+        # 2. AI-POWERED STAKING PROGRAM locks — shift locked_at + matures_at back; leave
         #    next_payout_at (future) so the engine does no catch-up.
         locks = (await db.execute(
             select(FixedReturnLock).where(FixedReturnLock.user_id == user.id)

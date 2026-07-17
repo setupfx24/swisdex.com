@@ -1,4 +1,4 @@
-"""Fixed Return admin gates — early-withdrawal approval + per-user rate override.
+"""AI-POWERED STAKING PROGRAM admin gates — early-withdrawal approval + per-user rate override.
 
 Client request 2026-06-01:
 1. Early withdrawals must wait for admin approval instead of crediting

@@ -25,13 +25,23 @@ import { barSocket, type ServerBar } from '@/lib/ws/barSocket';
 
 /* ─── Resolution maps ─── */
 
+// Resolutions offered in the interval menu (client 2026-07-13 added 3m, 10m,
+// 45m, 2h, 3h, W, M, 3M, 6M, 12M). Only SERVER_RESOLUTIONS exist on the
+// backend — every other entry is built CLIENT-SIDE by the charting library
+// from a base resolution (3←1, 10←5, 45←15, 120/180←60, W/M/3M/6M/12M←1D),
+// declared via intraday_multipliers + has_weekly_and_monthly:false below.
+// The datafeed therefore only ever receives requests for SERVER_RESOLUTIONS.
+const SERVER_RESOLUTIONS = ['1', '5', '15', '30', '60', '240'] as ResolutionString[];
+
 const SUPPORTED_RESOLUTIONS: ResolutionString[] = [
-  '1', '5', '15', '30', '60', '240', '1D',
+  '1', '3', '5', '10', '15', '30', '45', '60', '120', '180', '240',
+  '1D', '1W', '1M', '3M', '6M', '12M',
 ] as ResolutionString[];
 
 const RESOLUTION_TO_SECONDS: Record<string, number> = {
-  '1': 60, '5': 300, '15': 900, '30': 1800,
-  '60': 3600, '240': 14400, D: 86400, '1D': 86400,
+  '1': 60, '3': 180, '5': 300, '10': 600, '15': 900, '30': 1800, '45': 2700,
+  '60': 3600, '120': 7200, '180': 10800, '240': 14400, D: 86400, '1D': 86400,
+  '1W': 604800, '1M': 2592000, '3M': 7776000, '6M': 15552000, '12M': 31104000,
 };
 
 /* ─── Binance (crypto) ─── */
@@ -47,13 +57,7 @@ const BINANCE_PAIRS: Record<string, string> = {
 // too, so the engine /bars endpoint is the single candle source for every
 // symbol. BINANCE_PAIRS above is kept only to classify a symbol as crypto.
 
-/* ─── Synthetic historical candles (fallback) ─── */
-
-function seededRand(seed: number) {
-  let s = Math.abs(seed) % 2147483647;
-  if (s === 0) s = 1;
-  return () => { s = (s * 16807) % 2147483647; return (s - 1) / 2147483646; };
-}
+/* ─── Symbol category (weekend-bar filter) ─── */
 
 function getSymbolCategory(symbol: string): string {
   const s = symbol.toUpperCase();
@@ -64,63 +68,18 @@ function getSymbolCategory(symbol: string): string {
   return 'forex';
 }
 
-function generateSyntheticBars(
-  symbol: string, mid: number, spread: number,
-  resolution: string, from: number, to: number,
-): Bar[] {
-  if (mid <= 0) return [];
-  const resSec = RESOLUTION_TO_SECONDS[resolution] ?? 300;
-  const cat = getSymbolCategory(symbol);
-
-  let volPct = 0.0003;
-  if (cat === 'metals') volPct = 0.0004;
-  if (cat === 'indices') volPct = 0.0005;
-  if (cat === 'commodities') volPct = 0.0006;
-  if (cat === 'crypto') volPct = 0.001;
-  const resFactor = Math.sqrt(resSec / 300);
-  const volatility = Math.max(spread * 1.5, mid * volPct * resFactor);
-
-  const nowSec = Math.floor(Date.now() / 1000);
-  const toSec = Math.min(to, nowSec);
-  const fromAligned = Math.floor(from / resSec) * resSec;
-  const toAligned = Math.floor(toSec / resSec) * resSec;
-  if (fromAligned >= toAligned) return [];
-
-  const count = Math.min(Math.floor((toAligned - fromAligned) / resSec) + 1, 500);
-  const startSec = toAligned - (count - 1) * resSec;
-
-  // Seed must be STABLE across timeframe switches. Previously it included
-  // floor(startSec / 86400) (a per-day offset), which changes when the user
-  // changes resolution because resSec * (count - 1) shifts startSec across
-  // day boundaries. That made the chart look like an entirely different
-  // history every time the trader clicked 5m → 1h → 4h.
-  // Now seeded only by symbol — pattern stays consistent across TF switches.
-  // (Right architectural fix is to use real OHLC from AllTick REST; this
-  // keeps the synthetic fallback usable until that lands.)
-  const seed = symbol.split('').reduce((a, c) => a + c.charCodeAt(0), 0);
-  const rand = seededRand(seed);
-
-  const increments = Array.from({ length: count }, () => (rand() - 0.5) * volatility * 2);
-  let cumSum = 0;
-  const cumSums = increments.map((inc) => { cumSum += inc; return cumSum; });
-  const lastCum = cumSums[cumSums.length - 1];
-  const prices = cumSums.map((c) => mid + (c - lastCum));
-
-  const bars: Bar[] = [];
-  let prev = mid - (cumSums[0] - lastCum);
-  for (let i = 0; i < count; i++) {
-    const open = prev;
-    const close = prices[i];
-    bars.push({
-      time: (startSec + i * resSec) * 1000,
-      open, close,
-      high: Math.max(open, close) + Math.abs(rand() * volatility * 0.4),
-      low: Math.min(open, close) - Math.abs(rand() * volatility * 0.4),
-      volume: Math.floor(rand() * 500) + 50,
-    });
-    prev = close;
-  }
-  return bars;
+// Drop Saturday/Sunday candles from a NON-crypto symbol's history (client
+// 2026-07-11). Forex / metals / indices / commodities markets are closed on
+// weekends, so weekend bars are dashed "no-trade" fillers that just clutter the
+// chart. New bars already exclude weekends; this strips the OLD ones from the
+// history the chart renders. Crypto (24/7) is left untouched. Weekday is read
+// in UTC — bar.time is bar-open in ms UTC.
+function dropWeekendBars(bars: Bar[], symbol: string): Bar[] {
+  if (getSymbolCategory(symbol) === 'crypto') return bars;
+  return bars.filter((b) => {
+    const day = new Date(b.time).getUTCDay(); // 0 = Sun, 6 = Sat
+    return day !== 0 && day !== 6;
+  });
 }
 
 /* ─── Wait for price ─── */
@@ -296,7 +255,14 @@ export const swisDexDatafeed: IBasicDataFeed = {
       session: '24x7', timezone: 'Etc/UTC',
       exchange: 'SwisDex', listed_exchange: 'SwisDex',
       format: 'price', pricescale: Math.pow(10, digits), minmov: 1,
-      has_intraday: true, has_daily: true, has_weekly_and_monthly: false,
+      has_intraday: true, has_daily: true,
+      // false on purpose: the library BUILDS 1W/1M/3M/6M/12M from our 1D bars.
+      has_weekly_and_monthly: false,
+      // Base intraday resolutions the SERVER provides; anything else in
+      // supported_resolutions (3, 10, 45, 120, 180) is aggregated client-side
+      // from the closest base (client 2026-07-13 timeframe additions).
+      intraday_multipliers: SERVER_RESOLUTIONS,
+      daily_multipliers: ['1'] as ResolutionString[],
       supported_resolutions: SUPPORTED_RESOLUTIONS,
       volume_precision: 2, data_status: 'streaming',
     };
@@ -337,30 +303,19 @@ export const swisDexDatafeed: IBasicDataFeed = {
               time: b.time * 1000, open: b.open, high: b.high,
               low: b.low, close: b.close, volume: b.volume,
             }, hs, digits));
-            onResult(bars, { noData: false });
+            onResult(dropWeekendBars(bars, sym), { noData: false });
             return;
           }
         }
       } catch { /* backend unavailable — fall through */ }
 
-      // 2. Last resort — synthetic walk anchored to the current live mid.
-      //    (Binance was removed: InfoWay feeds crypto too, so the engine /bars
-      //    above is the single source for every symbol — client 2026-06-26.)
-      //    Used only if both backend and Binance failed (fresh deploy with
-      //    no aggregated bars in TimescaleDB yet). Synthetic bars do NOT
-      //    aggregate across TFs, so this is intentionally the final fallback.
-      const tick = await waitForPrice(sym);
-      if (tick && tick.bid > 0) {
-        // Anchor the synthetic walk at the BID, not the mid, for the same
-        // chart==bid alignment as the engine-bar path above.
-        const spread = Math.abs(tick.ask - tick.bid);
-        const bars = generateSyntheticBars(sym, tick.bid, spread, String(resolution), from, to);
-        if (bars.length > 0) {
-          onResult(bars, { noData: false });
-          return;
-        }
-      }
-
+      // 2. No data → say so honestly. The synthetic random-walk fallback was
+      //    REMOVED (client 2026-07-14): it painted flat fake bars anchored to
+      //    TODAY'S price wherever real history hadn't loaded, which drew a
+      //    giant cliff/"gap" where the fake region met real InfoWay history
+      //    (e.g. XAUUSD 1h flat at ~4,050 jumping to the real ~4,800 of
+      //    April). Never invent prices — the chart simply ends at the oldest
+      //    real bar, like MT5.
       onResult([], { noData: true });
     } catch (err) {
       onError((err as Error).message || 'getBars failed');

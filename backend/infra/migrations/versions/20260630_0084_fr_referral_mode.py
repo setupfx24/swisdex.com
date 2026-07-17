@@ -1,4 +1,4 @@
-"""Per-referrer payout mode for the AI Powered Staking (Fixed Return) referral.
+"""Per-referrer payout mode for the AI-POWERED STAKING PROGRAM (AI-POWERED STAKING PROGRAM) referral.
 
 A referrer chooses globally how they want their staking-referral commission:
   'principal' → a % of each referred user's PRINCIPAL, once when they lock.

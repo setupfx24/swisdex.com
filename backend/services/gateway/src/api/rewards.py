@@ -79,6 +79,29 @@ async def redeem(
     return await rewards_service.redeem(db, current_user["user_id"], item_id)
 
 
+# ── Referral staking reward campaigns (client 2026-07-11) ──────────────────
+
+@router.get("/campaigns")
+async def my_reward_campaigns(
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    """Admin reward offers + MY qualifying referred-staking progress."""
+    from ..services import reward_campaign_service
+    return await reward_campaign_service.my_campaigns(db, current_user["user_id"])
+
+
+@router.post("/campaigns/{campaign_id}/claim")
+async def claim_reward_campaign(
+    campaign_id: UUID,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Claim an ended offer — credits the reward to the main wallet."""
+    from ..services import reward_campaign_service
+    return await reward_campaign_service.claim(db, current_user["user_id"], campaign_id)
+
+
 @router.get("/leaderboard")
 async def leaderboard(
     kind: str = "traders",

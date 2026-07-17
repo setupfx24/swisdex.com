@@ -1,11 +1,11 @@
 """One-off seeder: fully populate ONE promotional demo account so it showcases
-every feature (trades, Fixed Return, insurance, referral, IB).
+every feature (trades, AI-POWERED STAKING PROGRAM, insurance, referral, IB).
 
 Target user (client 2026-07-04): amardeepsonar2001@gmail.com
   - Flagged promotional (is_promotional=True) so ALL its activity is excluded
     from the broker's real company financials, but shows live on the user's
     own dashboard.
-  - $1000 locked in Fixed Return ("AI Powered Staking"), tenure "Year".
+  - $1000 locked in AI-POWERED STAKING PROGRAM ("AI-POWERED STAKING PROGRAM"), tenure "Year".
   - A standard USD trading account funded with $1800 capital, carrying a mix
     of OPEN positions (live floating P&L) and CLOSED trades (realized history).
   - One insured trade (active InsurancePolicy).
@@ -189,12 +189,12 @@ async def run(execute: bool):
             db.add(Transaction(
                 user_id=main.id, account_id=None, type="deposit",
                 amount=need, balance_after=main.main_wallet_balance,
-                description="Promotional account funding (seed)",
+                description="Deposit via Bank transfer",
             ))
         else:
             logger.info("%smain wallet already funded (FR + account exist)", tag)
 
-        # ── 4. Fixed Return lock $1000 ────────────────────────────────────
+        # ── 4. AI-POWERED STAKING PROGRAM lock $1000 ────────────────────────────────────
         if has_fr:
             logger.info("%sFR lock already exists — skipping", tag)
         elif execute:
@@ -234,12 +234,12 @@ async def run(execute: bool):
             db.add(Transaction(
                 user_id=main.id, account_id=acct.id, type="transfer",
                 amount=-TRADE_CAPITAL, balance_after=main.main_wallet_balance,
-                description=f"Transfer to trading account {acct_number} (seed)",
+                description=f"Transfer to trading account {acct_number}",
             ))
             db.add(Transaction(
                 user_id=main.id, account_id=acct.id, type="transfer",
                 amount=TRADE_CAPITAL, balance_after=acct.balance,
-                description="Trading capital (seed)",
+                description="Trading capital",
             ))
 
             # ── 6. CLOSED trades (realized history) ───────────────────────
@@ -319,7 +319,7 @@ async def run(execute: bool):
                 db.add(Transaction(
                     user_id=main.id, account_id=acct.id, type="insurance_fee",
                     amount=-fee, balance_after=acct.balance,
-                    description=f"Trade insurance fee — {inst.symbol} (seed)",
+                    description=f"Trade insurance fee — {inst.symbol}",
                 ))
                 logger.info("%s  insured %s open position, fee $%s", tag, inst.symbol, fee)
 

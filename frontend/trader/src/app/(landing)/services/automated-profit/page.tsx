@@ -99,7 +99,7 @@ export default function AutomatedProfitPage() {
         }
       />
 
-      {/* 3. Fixed Return policy — return rates by tenure and deposit tier */}
+      {/* 3. AI-POWERED STAKING PROGRAM policy — return rates by tenure and deposit tier */}
       <div id="plans">
         <FixedReturnRateTable />
       </div>

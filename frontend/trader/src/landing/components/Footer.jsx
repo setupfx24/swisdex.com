@@ -32,7 +32,7 @@ const columns = {
   ],
   Products: [
     { name: 'IB Referral',              path: '/products/ib-referral' },
-    { name: 'AI Powered Staking Program',       path: '/products/fixed-return-insurance' },
+    { name: 'AI-POWERED STAKING PROGRAM',   path: '/products/fixed-return-insurance' },
   ],
   Company: [
     { name: 'About Us',       path: '/company/about' },
@@ -226,21 +226,13 @@ export default function Footer() {
           </p>
           {/* Cookie Settings — surfaces the consent modal even after
               the user has already accepted/saved a preference, so the
-              choice stays revisable per GDPR.
-
-              suppressHydrationWarning: browser extensions (form fillers,
-              password managers, FormData helpers) inject `fdprocessedid`
-              onto interactive buttons AFTER server HTML ships but BEFORE
-              React hydrates. React then bails with an attribute-mismatch
-              warning. The attribute is harmless and hydration completes
-              correctly — this pin just silences the console noise. */}
+              choice stays revisable per GDPR. */}
           <button
             type="button"
             onClick={openCookieSettings}
             className="inline-flex items-center gap-1.5 text-xs hover:underline transition-colors"
             style={{ color: 'var(--fx-text-2)' }}
             aria-label="Open cookie settings"
-            suppressHydrationWarning
           >
             <Cookie size={13} /> Cookie Settings
           </button>

@@ -134,7 +134,7 @@ function RMAssignCard({ userId, currentRmId, currentRmName, onSaved }: {
   );
 }
 
-/** Per-referrer override of the Fixed Return referral commission %. Blank on a
+/** Per-referrer override of the AI-POWERED STAKING PROGRAM referral commission %. Blank on a
  *  leg = fall back to the global rate. Hidden if the endpoint 403s. */
 function FrReferralOverrideCard({ userId }: { userId: string }) {
   const [loading, setLoading] = useState(true);
@@ -170,7 +170,7 @@ function FrReferralOverrideCard({ userId }: { userId: string }) {
         principal_pct: prin.trim() === '' ? null : parseFloat(prin),
         interest_pct: intr.trim() === '' ? null : parseFloat(intr),
       });
-      toast.success('Fixed Return referral override saved');
+      toast.success('AI-POWERED STAKING PROGRAM referral override saved');
       load();
     } catch (e: any) {
       toast.error(e?.message || 'Failed to save override');
@@ -181,9 +181,9 @@ function FrReferralOverrideCard({ userId }: { userId: string }) {
 
   return (
     <div className="bg-bg-secondary border border-border-primary rounded-lg p-5">
-      <h2 className="text-base font-bold text-text-primary mb-1">Fixed Return referral commission</h2>
+      <h2 className="text-base font-bold text-text-primary mb-1">AI-POWERED STAKING PROGRAM referral commission</h2>
       <p className="text-xxs text-text-tertiary mb-3">
-        Custom % this user earns for referring Fixed Return (AI Powered Staking) lockers.
+        Custom % this user earns for referring AI-POWERED STAKING PROGRAM (AI-POWERED STAKING PROGRAM) lockers.
         Leave a field blank to use the global rate. Their payout mode is{' '}
         <span className="text-text-secondary">{info.mode}</span> (commission applies to that leg).
       </p>
@@ -425,7 +425,7 @@ export default function UserDetailPage() {
           onSaved={fetchUser}
         />
 
-        {/* Per-referrer Fixed Return referral commission % override */}
+        {/* Per-referrer AI-POWERED STAKING PROGRAM referral commission % override */}
         <FrReferralOverrideCard userId={userId} />
 
         {/* Deposit history — how each deposit was made + which admin approved */}
@@ -498,8 +498,8 @@ export default function UserDetailPage() {
         {/* Account security & sessions — Reset Password, Revoke, list */}
         <SecurityCard userId={userId} user={user} />
 
-        {/* Fixed Return — managing these requires fixed_return.manage (client
-            2026-06-20: a normal employee was still able to grant fixed return). */}
+        {/* AI-POWERED STAKING PROGRAM — managing these requires fixed_return.manage (client
+            2026-06-20: a normal employee was still able to grant AI-POWERED STAKING PROGRAM). */}
         {can('fixed_return.manage') && (
           <>
             <FixedReturnOverrideCard userId={userId} />
@@ -555,7 +555,7 @@ export default function UserDetailPage() {
               <p className="text-xxs text-text-tertiary mt-0.5">
                 Mark the WHOLE user as promotional. Everything stays live on their own dashboard,
                 but ALL their activity (every account&apos;s trades / deposits / withdrawals +
-                referral / IB / fixed return) is EXCLUDED from the real company financials.{' '}
+                referral / IB / AI-POWERED STAKING PROGRAM) is EXCLUDED from the real company financials.{' '}
                 {data.user.is_promotional ? 'Currently promotional.' : 'Currently a real account.'}
               </p>
             </div>
@@ -615,7 +615,7 @@ export default function UserDetailPage() {
 }
 
 
-// ─── Fixed Return per-user rate override ─────────────────────────────
+// ─── AI-POWERED STAKING PROGRAM per-user rate override ─────────────────────────────
 
 interface FRConfig {
   tiers: { label: string; min_amount: number }[];
@@ -740,7 +740,7 @@ function FixedReturnOverrideCard({ userId }: { userId: string }) {
     <div className="bg-bg-secondary border border-border-primary rounded-lg p-5">
       <div className="flex items-start justify-between gap-3 mb-3 flex-wrap">
         <div className="min-w-0">
-          <h2 className="text-base font-bold text-text-primary">Fixed Return — Personal Rates</h2>
+          <h2 className="text-base font-bold text-text-primary">AI-POWERED STAKING PROGRAM — Personal Rates</h2>
           <p className="text-xs text-text-tertiary mt-0.5 max-w-2xl">
             Set a custom rate matrix that only applies to this trader. When inactive, the user
             sees the global ladder configured on{' '}
@@ -1083,8 +1083,8 @@ function Flag({ label, value, good }: { label: string; value: string; good: bool
   );
 }
 
-// ─── Fixed Return — Admin grant ──────────────────────────────────────
-// Admin-side form that creates a Fixed Return lock for this user with
+// ─── AI-POWERED STAKING PROGRAM — Admin grant ──────────────────────────────────────
+// Admin-side form that creates a AI-POWERED STAKING PROGRAM lock for this user with
 // custom terms (principal, tenure, optional rate / lock-months override,
 // optional broker-funded source). Same engine path as a trader-self-
 // locked position — once created, the gateway interest engine drives
@@ -1119,7 +1119,7 @@ function FixedReturnBonusCard({ userId }: { userId: string }) {
   return (
     <div className="bg-bg-secondary border border-border-primary rounded-lg p-5">
       <div className="mb-3">
-        <h2 className="text-base font-bold text-text-primary">Fixed Return — Special Bonus</h2>
+        <h2 className="text-base font-bold text-text-primary">AI-POWERED STAKING PROGRAM — Special Bonus</h2>
         <p className="text-xs text-text-tertiary mt-0.5 max-w-2xl">
           Reward a Fixed-Return holder with a one-off bonus credited to their main wallet —
           either a <span className="text-text-primary font-semibold">percentage of their active locked principal</span> or a
@@ -1178,7 +1178,7 @@ function FixedReturnGrantCard({ userId }: { userId: string }) {
       if (lockMonthsOverride.trim() && Number.isFinite(m) && m > 0) body.lock_months_override = m;
       if (note.trim()) body.note = note.trim();
       await adminApi.post(`/fixed-return/users/${userId}/grant`, body);
-      toast.success('Fixed Return lock created');
+      toast.success('AI-POWERED STAKING PROGRAM lock created');
       setPrincipal('');
       setRatePctOverride('');
       setLockMonthsOverride('');
@@ -1193,9 +1193,9 @@ function FixedReturnGrantCard({ userId }: { userId: string }) {
   return (
     <div className="bg-bg-secondary border border-border-primary rounded-lg p-5">
       <div className="mb-4">
-        <h2 className="text-base font-bold text-text-primary">Fixed Return — Grant a Lock</h2>
+        <h2 className="text-base font-bold text-text-primary">AI-POWERED STAKING PROGRAM — Grant a Lock</h2>
         <p className="text-xs text-text-tertiary mt-0.5 max-w-2xl">
-          Create a Fixed Return position for this user with any rate, tenure, or
+          Create a AI-POWERED STAKING PROGRAM position for this user with any rate, tenure, or
           lock duration. Use <span className="text-text-primary font-semibold">User wallet</span>{' '}
           to debit their main balance (admin acts on their behalf), or{' '}
           <span className="text-text-primary font-semibold">Admin grant</span>{' '}
@@ -1292,7 +1292,7 @@ function FixedReturnGrantCard({ userId }: { userId: string }) {
               : 'bg-buy text-white hover:bg-buy-light',
           )}
         >
-          {submitting ? 'Creating…' : 'Grant Fixed Return'}
+          {submitting ? 'Creating…' : 'Grant AI-POWERED STAKING PROGRAM'}
         </button>
       </div>
     </div>

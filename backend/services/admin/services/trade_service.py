@@ -42,10 +42,11 @@ async def list_positions(
     start_date=None, end_date=None, sort: str = "recent",
 ):
     # Exclude demo-account activity from admin views (demo trades are practice-only).
+    # Promotional demo accounts are also hidden from the admin panel.
     query = (
         select(Position)
         .join(TradingAccount, Position.account_id == TradingAccount.id)
-        .where(TradingAccount.is_demo == False)
+        .where(TradingAccount.is_demo == False, TradingAccount.is_promotional.isnot(True))
     )
     if status_filter == "open":
         query = query.where(Position.status == PositionStatus.OPEN.value)
@@ -145,7 +146,7 @@ async def list_orders(
     query = (
         select(Order)
         .join(TradingAccount, Order.account_id == TradingAccount.id)
-        .where(TradingAccount.is_demo == False)
+        .where(TradingAccount.is_demo == False, TradingAccount.is_promotional.isnot(True))
     )
     if status_filter == "pending":
         query = query.where(Order.status == OrderStatus.PENDING)
@@ -206,7 +207,7 @@ async def list_trade_history(
     query = (
         select(TradeHistory)
         .join(TradingAccount, TradeHistory.account_id == TradingAccount.id)
-        .where(TradingAccount.is_demo == False)
+        .where(TradingAccount.is_demo == False, TradingAccount.is_promotional.isnot(True))
     )
     if start_date is not None:
         query = query.where(TradeHistory.closed_at >= start_date)

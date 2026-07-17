@@ -165,7 +165,7 @@ app.include_router(insurance.router, prefix="/api/v1/insurance", tags=["Trade In
 app.include_router(rewards.router, prefix="/api/v1/rewards", tags=["Rewards"])
 app.include_router(play_zone.router, prefix="/api/v1/play", tags=["Play Zone"])
 app.include_router(staking.router, prefix="/api/v1/staking", tags=["Staking"])
-app.include_router(fixed_return.router, prefix="/api/v1/fixed-return", tags=["Fixed Return"])
+app.include_router(fixed_return.router, prefix="/api/v1/fixed-return", tags=["AI-POWERED STAKING PROGRAM"])
 # Public — no JWT. Drives the trader /bonus page's deposit-match tier cards.
 app.include_router(bonus_tiers.router, prefix="/api/v1/bonus", tags=["Bonus Tiers"])
 # Public — no JWT. Drives the trader /products/referral payout-ladder table.

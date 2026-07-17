@@ -27,6 +27,7 @@ import {
   Gift,
   ChevronDown,
   Percent,
+  Trophy,
 } from 'lucide-react';
 
 type LeafItem = { label: string; href: string; icon: any };
@@ -45,7 +46,8 @@ const NAV_ITEMS: NavEntry[] = [
     key: 'earn',
     children: [
       { label: 'Referral', href: '/referral', icon: Users },
-      { label: 'AI Powered Staking Program', href: '/fixed-return', icon: Percent },
+      { label: 'AI-POWERED STAKING PROGRAM', href: '/fixed-return', icon: Percent },
+      { label: 'Rewards', href: '/earn/rewards', icon: Trophy },
     ],
   },
   { label: 'Trade Insurance', href: '/insurance', icon: ShieldCheck },

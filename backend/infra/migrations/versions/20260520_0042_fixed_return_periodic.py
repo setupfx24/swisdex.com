@@ -1,4 +1,4 @@
-"""Fixed Return v2 — periodic interest payouts + fixed 24-month lock.
+"""AI-POWERED STAKING PROGRAM v2 — periodic interest payouts + fixed 24-month lock.
 
 Tenure now means PAYOUT FREQUENCY, not lock duration. Every lock runs
 for the same admin-set lock_months (default 24), with the user receiving

@@ -67,6 +67,10 @@ class UserOut(BaseModel):
     email_verified: Optional[bool] = None
     two_factor_enabled: Optional[bool] = None
     bank_deposit_enabled: Optional[bool] = None
+    # Whole-user promotional/pilot flag. Was missing here, so Pydantic
+    # silently dropped it from the user-detail response and the admin
+    # toggle never reflected its state (client 2026-07-11).
+    is_promotional: Optional[bool] = None
 
     class Config:
         from_attributes = True

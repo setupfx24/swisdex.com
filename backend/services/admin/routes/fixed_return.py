@@ -1,4 +1,4 @@
-"""Admin endpoints for the Fixed Return product.
+"""Admin endpoints for the AI-POWERED STAKING PROGRAM product.
 
 Two surfaces:
   - Early-withdrawal approval queue — client request 2026-06-01.
@@ -27,7 +27,7 @@ from packages.common.src.models import User
 from services import fixed_return_service
 
 
-router = APIRouter(prefix="/fixed-return", tags=["Admin · Fixed Return"])
+router = APIRouter(prefix="/fixed-return", tags=["Admin · AI-POWERED STAKING PROGRAM"])
 
 
 # ─── Early-withdrawal approval queue ─────────────────────────────────
@@ -38,11 +38,13 @@ class RejectRequest(BaseModel):
 
 @router.get("/pending")
 async def list_pending(
+    kind: str = "early",
     _admin: dict = Depends(require_permission("fixed_return.view")),
     db: AsyncSession = Depends(get_db),
 ) -> list[dict[str, Any]]:
-    """Locks currently parked in ``early_pending`` — admin queue."""
-    return await fixed_return_service.list_pending(db)
+    """Approval queue. kind='early' → early-withdrawal requests;
+    kind='principal' → matured principal-withdrawal claims."""
+    return await fixed_return_service.list_pending(db, kind=kind)
 
 
 @router.post("/{lock_id}/approve")
@@ -118,7 +120,7 @@ async def grant_lock(
     _admin: dict = Depends(require_permission("fixed_return.manage")),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """Admin creates a Fixed Return lock for one user with custom terms.
+    """Admin creates a AI-POWERED STAKING PROGRAM lock for one user with custom terms.
 
     Use cases the client called out:
       • Set up a specific user with a promotional rate that isn't on

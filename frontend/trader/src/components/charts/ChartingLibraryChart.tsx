@@ -158,6 +158,71 @@ export default function ChartingLibraryChart() {
     setDialog(d);
   };
 
+  // The TradingView charting library throws "Value is null" from its right-click
+  // context-menu builder (_customActions → _showContextMenu) when the menu targets
+  // one of our locked programmatic shapes (SL/TP/entry/ask lines). It's a benign,
+  // non-fatal library-internal bug — the app is unaffected. Swallow ONLY that exact
+  // rejection (message + charting-library stack) so it doesn't surface as an
+  // uncaught console error; anything else propagates normally. (client 2026-07-11)
+  useEffect(() => {
+    const onRej = (e: PromiseRejectionEvent) => {
+      const reason: any = e.reason;
+      const msg = typeof reason === 'string' ? reason : reason?.message;
+      const stack: string = (reason && reason.stack) || '';
+      if (msg === 'Value is null' && stack.includes('charting_library')) {
+        e.preventDefault();
+      }
+    };
+    window.addEventListener('unhandledrejection', onRej);
+    return () => window.removeEventListener('unhandledrejection', onRej);
+  }, []);
+
+  // The chart runs in a same-origin iframe; its dialogs (Indicators, chart
+  // settings, etc.) render INSIDE it, while our SL/TP/close overlay sits OVER the
+  // iframe — so the buttons cover the dialog. Watch the iframe document and hide
+  // our overlay while any TradingView dialog ([data-dialog-name]) is open, then
+  // restore it when the dialog closes. (client 2026-07-11)
+  useEffect(() => {
+    const overlay = overlayRef.current;
+    const container = containerRef.current;
+    if (!overlay || !container) return;
+    const observers: MutationObserver[] = [];
+    const watched = new Set<Document>();
+    let raf = 0;
+    const dialogOpen = () => {
+      for (const d of watched) {
+        try { if (d.querySelector('[data-dialog-name]')) return true; } catch { /* cross-origin */ }
+      }
+      return false;
+    };
+    const check = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        // MUST be display:none, not visibility — the SL/TP/close buttons set their
+        // own visibility:visible, which would override an ancestor's hidden.
+        overlay.style.display = dialogOpen() ? 'none' : '';
+      });
+    };
+    const watch = (d: Document | null | undefined) => {
+      if (!d || watched.has(d)) return;
+      watched.add(d);
+      const o = new MutationObserver(check);
+      try { o.observe(d.documentElement, { childList: true, subtree: true }); observers.push(o); } catch { /* noop */ }
+    };
+    watch(document); // dialogs may render in the host page…
+    const attachIframe = () => watch(container.querySelector('iframe')?.contentDocument); // …or inside the iframe
+    attachIframe();
+    const iv = setInterval(() => { attachIframe(); check(); }, 800);
+    const to = setTimeout(() => clearInterval(iv), 20000);
+    check();
+    return () => {
+      clearInterval(iv); clearTimeout(to);
+      observers.forEach((o) => o.disconnect());
+      if (raf) cancelAnimationFrame(raf);
+    };
+  }, []);
+
   // Create the widget once (and recreate ONLY on theme change — that needs a
   // full rebuild). The symbol is intentionally NOT a dependency here: changing
   // it is handled in-place by the effect below via setSymbol(). Tearing down and
@@ -235,6 +300,14 @@ export default function ChartingLibraryChart() {
         // in the console. Layout persistence uses saved_data + onAutoSaveNeeded
         // (localStorage) and does NOT need this feature.
         enabled_features: [],
+        // Pin the full timeframe set to the toolbar (client 2026-07-13:
+        // 3m/10m/45m/2h/3h + W/M; 3M/6M/12M stay in the interval menu).
+        favorites: {
+          intervals: [
+            '1', '3', '5', '10', '15', '30', '45',
+            '60', '120', '180', '240', '1D', '1W', '1M',
+          ] as any,
+        },
         // Native Trading-Terminal broker → the library draws each position's line
         // with P&L + close (✕) + draggable TP/SL (see broker.ts). Gated by the flag.
         ...(USE_NATIVE_BROKER ? {
@@ -960,6 +1033,24 @@ export default function ChartingLibraryChart() {
   return (
     <div className="relative w-full h-full min-h-[320px]">
       <div ref={containerRef} className="w-full h-full min-h-[320px]" />
+      {/* SwisDex logo watermark — faint, centered, non-interactive. Sits over the
+          chart canvas but under the SL/TP overlay (DOM order). Theme-aware. */}
+      <div className="pointer-events-none absolute inset-0 flex items-center justify-center overflow-hidden">
+        <img
+          src="/images/swisdex_png5.png"
+          alt=""
+          aria-hidden
+          draggable={false}
+          className="w-40 h-40 md:w-56 md:h-56 object-contain opacity-[0.06] select-none hidden dark:block"
+        />
+        <img
+          src="/images/swisdex_png.png"
+          alt=""
+          aria-hidden
+          draggable={false}
+          className="w-40 h-40 md:w-56 md:h-56 object-contain opacity-[0.06] select-none dark:hidden"
+        />
+      </div>
       <div ref={overlayRef} className="pointer-events-none absolute inset-0 overflow-hidden" />
       {dialog &&
         typeof document !== 'undefined' &&

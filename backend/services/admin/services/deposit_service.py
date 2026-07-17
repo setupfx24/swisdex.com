@@ -15,6 +15,12 @@ from packages.common.src.admin_schemas import DepositOut, WithdrawalOut, Paginat
 from dependencies import write_audit_log
 
 
+def _not_promo(user_id_col):
+    """Filter expression: exclude rows owned by a promotional demo account so
+    they never surface in admin listings."""
+    return user_id_col.notin_(select(User.id).where(User.is_promotional == True))  # noqa: E712
+
+
 def _deposit_to_out(d: Deposit, user: User = None) -> DepositOut:
     return DepositOut(
         id=str(d.id),
@@ -55,7 +61,7 @@ def _withdrawal_to_out(w: Withdrawal, user: User = None) -> WithdrawalOut:
 
 
 async def list_pending_deposits(page: int, per_page: int, db: AsyncSession):
-    query = select(Deposit).where(Deposit.status == "pending")
+    query = select(Deposit).where(Deposit.status == "pending", _not_promo(Deposit.user_id))
     count_q = select(func.count()).select_from(query.subquery())
     total = (await db.execute(count_q)).scalar() or 0
 
@@ -73,7 +79,7 @@ async def list_pending_deposits(page: int, per_page: int, db: AsyncSession):
 
 
 async def list_pending_withdrawals(page: int, per_page: int, db: AsyncSession):
-    query = select(Withdrawal).where(Withdrawal.status == "pending")
+    query = select(Withdrawal).where(Withdrawal.status == "pending", _not_promo(Withdrawal.user_id))
     count_q = select(func.count()).select_from(query.subquery())
     total = (await db.execute(count_q)).scalar() or 0
 
@@ -92,7 +98,7 @@ async def list_pending_withdrawals(page: int, per_page: int, db: AsyncSession):
 
 async def list_all_deposits(page: int, per_page: int, status: str | None, db: AsyncSession,
                             start_date=None, end_date=None):
-    query = select(Deposit)
+    query = select(Deposit).where(_not_promo(Deposit.user_id))
     if status and status != "all":
         if status == "approved":
             query = query.where(Deposit.status.in_(["approved", "auto_approved"]))
@@ -120,7 +126,7 @@ async def list_all_deposits(page: int, per_page: int, status: str | None, db: As
 
 async def list_all_withdrawals(page: int, per_page: int, status: str | None, db: AsyncSession,
                                start_date=None, end_date=None):
-    query = select(Withdrawal)
+    query = select(Withdrawal).where(_not_promo(Withdrawal.user_id))
     if status and status != "all":
         query = query.where(Withdrawal.status == status)
     if start_date is not None:

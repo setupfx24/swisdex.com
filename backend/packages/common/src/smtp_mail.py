@@ -97,8 +97,33 @@ _UNDELIVERABLE_SUFFIXES = (
 )
 
 
+# Platform-reserved addresses that never have a real mailbox — the shared
+# demo login account chief among them. Suppressed unconditionally so no
+# lifecycle email (statements, reminders, margin mails) ever bounces off them.
+_ALWAYS_SUPPRESSED = {
+    "demo@swisdex.com",
+}
+
+
+def _suppressed_addresses() -> set:
+    """Exact addresses that must never be emailed: the built-in
+    platform-reserved set plus ops' blacklist (comma-separated env
+    EMAIL_SUPPRESSION_LIST). For mailboxes that don't exist (team test
+    accounts like ib1@gmail.com, the shared demo user) — every lifecycle
+    email to them hard-bounces back to the sender inbox and, in volume,
+    hurts sender reputation (client 2026-07-14)."""
+    try:
+        from packages.common.src.config import get_settings
+        raw = (getattr(get_settings(), "EMAIL_SUPPRESSION_LIST", "") or "")
+    except Exception:  # noqa: BLE001 — never let config issues break sending
+        raw = ""
+    return _ALWAYS_SUPPRESSED | {a.strip().lower() for a in raw.split(",") if a.strip()}
+
+
 def _is_undeliverable(to_email: str) -> bool:
     addr = (to_email or "").strip().lower()
+    if addr in _suppressed_addresses():
+        return True
     return any(addr.endswith(sfx) for sfx in _UNDELIVERABLE_SUFFIXES)
 
 
@@ -305,7 +330,7 @@ async def send_email(
       - insure      — insured-trade payouts / reminders
       - affiliates  — IB, PAMM, MAM
       - voucher     — bonus, referral
-      - stacking    — fixed return, staking
+      - stacking    — AI-POWERED STAKING PROGRAM, staking
       - info        — generic / website / default (the default)
       - support     — auth, KYC, password reset
 

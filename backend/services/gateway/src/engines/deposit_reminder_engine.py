@@ -87,6 +87,7 @@ async def send_due_reminders(db: AsyncSession) -> int:
             User.deposit_nudge_sent_at.is_(None),
             User.created_at <= cutoff,
             User.is_demo.is_(False),
+            User.is_promotional.isnot(True),  # never email promo/demo accounts
             User.email_verified.is_(True),
             User.id.not_in(funded_q),
         )

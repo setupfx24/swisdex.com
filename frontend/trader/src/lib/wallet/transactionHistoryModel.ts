@@ -10,7 +10,7 @@ export type TransactionKind =
   | 'loss'
   | 'adjustment'
   | 'credit'
-  // Fixed Return: lock, interest payouts, matured returns, early
+  // AI-POWERED STAKING PROGRAM: lock, interest payouts, matured returns, early
   // withdrawal payouts/requests, admin grants — all carry their own
   // semantics so they render with a Fixed-Return label + are
   // filterable as a single category.
@@ -93,10 +93,10 @@ export function mapLedgerToTransaction(row: WalletLedgerItem): Transaction {
   else if (raw === 'bonus') uiType = 'bonus';
   else if (raw === 'correction') uiType = 'correction';
   else if (raw === 'adjustment') uiType = 'adjustment';
-  // Every Fixed Return ledger entry the backend emits starts with the
+  // Every AI-POWERED STAKING PROGRAM ledger entry the backend emits starts with the
   // `fixed_return` prefix — lock / interest / matured / early /
   // early_request / early_rejected / lock_admin / grant. Bucket them
-  // into a single UI kind so users see "Fixed Return" as a category.
+  // into a single UI kind so users see "AI-POWERED STAKING PROGRAM" as a category.
   else if (raw.startsWith('fixed_return')) uiType = 'fixed_return';
   const amt = Number(row.amount) || 0;
   return {
@@ -107,7 +107,7 @@ export function mapLedgerToTransaction(row: WalletLedgerItem): Transaction {
     currency: row.currency || 'USD',
     status: normalizeStatus(row.status || 'completed'),
     // For fixed_return rows the backend method is the raw type name
-    // (e.g. "Fixed Return Interest"). Keep it so the row sub-label
+    // (e.g. "AI-POWERED STAKING PROGRAM Interest"). Keep it so the row sub-label
     // tells the user exactly which sub-event this is.
     method: row.method || formatMethod(raw),
     created_at: row.created_at || new Date(0).toISOString(),
@@ -206,9 +206,9 @@ export function transactionTitle(tx: Transaction): string {
     case 'correction':
       return tx.description || 'Correction';
     case 'fixed_return':
-      // The backend method is e.g. "Fixed Return Lock Admin" / "Fixed
-      // Return Interest" / "Fixed Return Matured" — read that to pick
-      // a precise label instead of a generic "Fixed Return" everywhere.
+      // The backend method is e.g. "AI-POWERED STAKING PROGRAM Lock Admin" / "Fixed
+      // Return Interest" / "AI-POWERED STAKING PROGRAM Matured" — read that to pick
+      // a precise label instead of a generic "AI-POWERED STAKING PROGRAM" everywhere.
       // Falls back to a generic when the method is empty.
       return fixedReturnLabel(tx.method);
     default:
@@ -218,14 +218,14 @@ export function transactionTitle(tx: Transaction): string {
 
 function fixedReturnLabel(method: string): string {
   const m = (method || '').toLowerCase();
-  if (m.includes('interest')) return 'AI Powered Staking Program — Interest';
-  if (m.includes('matured')) return 'AI Powered Staking Program — Matured';
-  if (m.includes('early_request') || m.includes('early request')) return 'AI Powered Staking Program — Early withdrawal requested';
-  if (m.includes('early_rejected') || m.includes('early rejected')) return 'AI Powered Staking Program — Early withdrawal rejected';
-  if (m.includes('early')) return 'AI Powered Staking Program — Early withdrawal';
-  if (m.includes('grant')) return 'AI Powered Staking Program — Admin grant';
-  if (m.includes('lock')) return 'AI Powered Staking Program — Lock';
-  return 'AI Powered Staking Program';
+  if (m.includes('interest')) return 'AI Staking — Interest';
+  if (m.includes('matured')) return 'AI Staking — Matured';
+  if (m.includes('early_request') || m.includes('early request')) return 'AI Staking — Early withdrawal requested';
+  if (m.includes('early_rejected') || m.includes('early rejected')) return 'AI Staking — Early withdrawal rejected';
+  if (m.includes('early')) return 'AI Staking — Early withdrawal';
+  if (m.includes('grant')) return 'AI Staking — Admin grant';
+  if (m.includes('lock')) return 'AI Staking — Lock';
+  return 'AI-POWERED STAKING PROGRAM';
 }
 
 export const PAGE_SIZES = [10, 25, 50] as const;

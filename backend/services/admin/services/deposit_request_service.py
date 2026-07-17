@@ -40,7 +40,10 @@ def _serialize(r: DepositRequest, user: User | None) -> dict:
 async def list_requests(
     status_filter: str | None, page: int, per_page: int, db: AsyncSession,
 ) -> dict:
-    q = select(DepositRequest)
+    # Hide promotional demo accounts from the admin panel.
+    q = select(DepositRequest).where(
+        DepositRequest.user_id.notin_(select(User.id).where(User.is_promotional == True))  # noqa: E712
+    )
     if status_filter and status_filter != "all":
         q = q.where(DepositRequest.status == status_filter)
 

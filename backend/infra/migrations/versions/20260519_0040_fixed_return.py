@@ -1,4 +1,4 @@
-"""Fixed Return — user principal locks table + seed default rate matrix.
+"""AI-POWERED STAKING PROGRAM — user principal locks table + seed default rate matrix.
 
 Revision ID: 0040
 Revises: 0039
