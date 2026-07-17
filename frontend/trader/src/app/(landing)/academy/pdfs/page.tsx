@@ -4,6 +4,7 @@ import { useMemo, useState } from 'react';
 import Link from 'next/link';
 import { FileText, Download, ArrowUpRight, Mail } from 'lucide-react';
 import { BannerPlaceholder } from '@/swisdex/components/BannerPlaceholder';
+import SuccessModal from '@/swisdex/components/SuccessModal';
 
 type Cat = 'Guides' | 'E-books' | 'Reports';
 
@@ -32,6 +33,7 @@ const TABS: Array<'All' | Cat> = ['All', 'Guides', 'E-books', 'Reports'];
 export default function AcademyPdfsPage() {
   const [tab, setTab] = useState<'All' | Cat>('All');
   const [email, setEmail] = useState('');
+  const [showSuccess, setShowSuccess] = useState(false);
 
   const list = useMemo(() => (tab === 'All' ? PDFS : PDFS.filter((p) => p.category === tab)), [tab]);
 
@@ -111,7 +113,7 @@ export default function AcademyPdfsPage() {
             </p>
           </div>
           <form
-            onSubmit={(e) => { e.preventDefault(); alert('Thanks — we\'ll add you to the list. (Demo only.)'); setEmail(''); }}
+            onSubmit={(e) => { e.preventDefault(); setShowSuccess(true); setEmail(''); }}
             className="flex flex-col sm:flex-row gap-3"
             aria-label="Subscribe for new PDFs"
           >
@@ -135,6 +137,15 @@ export default function AcademyPdfsPage() {
           </form>
         </div>
       </section>
+
+      <SuccessModal
+        open={showSuccess}
+        title="You're on the list"
+        message="Thanks for subscribing. We'll send each new guide, e-book, and quarterly report straight to your inbox as soon as it's published."
+        ctaLabel="OK"
+        onClose={() => setShowSuccess(false)}
+        footnote="No spam — unsubscribe anytime from any email."
+      />
     </main>
   );
 }

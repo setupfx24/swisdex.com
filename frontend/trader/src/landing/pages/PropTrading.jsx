@@ -1,9 +1,13 @@
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Bell, ShieldCheck, Target, TrendingUp, Award, Layers } from 'lucide-react'
 import Button from '../components/Button'
 import ScrollReveal, { ScrollRevealGroup, ScrollRevealItem } from '../components/animations/ScrollReveal'
+import SuccessModal from '@/swisdex/components/SuccessModal'
 
 const PropTrading = () => {
+  const [showSuccess, setShowSuccess] = useState(false)
+
   return (
     <div className="min-h-screen pt-20">
       {/* Hero — Coming Soon */}
@@ -39,7 +43,7 @@ const PropTrading = () => {
 
             <form
               className="mt-9 mx-auto max-w-xl"
-              onSubmit={(e) => { e.preventDefault(); alert('You are on the early-access list.') }}
+              onSubmit={(e) => { e.preventDefault(); setShowSuccess(true) }}
             >
               <div className="glass-card rounded-full p-1.5 flex items-center gap-2">
                 <input
@@ -107,6 +111,15 @@ const PropTrading = () => {
           </ScrollReveal>
         </div>
       </section>
+
+      <SuccessModal
+        open={showSuccess}
+        title="You're on the list"
+        message="Thanks for your interest. We'll email you the moment the SwisDex Prop Program challenge opens in Q3 2026."
+        ctaLabel="OK"
+        onClose={() => setShowSuccess(false)}
+        footnote="One email at launch. Unsubscribe in one click."
+      />
     </div>
   )
 }

@@ -4,6 +4,7 @@ import { useMemo, useState } from 'react';
 import Link from 'next/link';
 import { Search, Calendar, User, ArrowRight, ArrowUpRight, ArrowLeft } from 'lucide-react';
 import { BannerPlaceholder } from '@/swisdex/components/BannerPlaceholder';
+import SuccessModal from '@/swisdex/components/SuccessModal';
 
 interface Post {
   id: string;
@@ -31,6 +32,7 @@ const CATEGORIES = ['Forex', 'Crypto', 'Strategy', 'Tools', 'Commodities', 'Guid
 export default function AcademyBlogsPage() {
   const [search, setSearch] = useState('');
   const [page, setPage]     = useState(1);
+  const [showSuccess, setShowSuccess] = useState(false);
 
   const featured = POSTS.find((p) => p.featured) ?? POSTS[0];
   const rest = POSTS.filter((p) => p.id !== featured.id);
@@ -181,7 +183,7 @@ export default function AcademyBlogsPage() {
             </div>
 
             <form
-              onSubmit={(e) => { e.preventDefault(); alert('Subscribed. (Demo only.)'); }}
+              onSubmit={(e) => { e.preventDefault(); setShowSuccess(true); }}
               className="liquid-glass-strong rounded-2xl p-5"
               aria-label="Newsletter signup"
             >
@@ -203,6 +205,15 @@ export default function AcademyBlogsPage() {
           </aside>
         </div>
       </div>
+
+      <SuccessModal
+        open={showSuccess}
+        title="You're subscribed"
+        message="Thanks for joining. Every Friday you'll get a fresh trade idea, a market recap, and the week's best educational blog — direct to your inbox."
+        ctaLabel="OK"
+        onClose={() => setShowSuccess(false)}
+        footnote="No spam. Unsubscribe anytime."
+      />
     </main>
   );
 }
