@@ -121,8 +121,20 @@ export default function ReferralPage() {
           qualification?: Partial<Qualification>;
         } = await res.json();
         if (cancelled) return;
-        const list = buildTiers(data.tiers || []);
-        if (list.length > 0) setTiers(list);
+        // Only accept the API response if it looks like real tier data:
+        //   – at least one tier has a non-zero per-lot payout, AND
+        //   – the tiers actually differ in min_activations (i.e. it's a
+        //     ladder, not all-1s / all-0s which is what an un-seeded admin
+        //     endpoint returns).
+        // Otherwise keep FALLBACK_TIERS so the marketing page still shows
+        // meaningful ranges + rewards rather than "1-1 / 1-1 / 1+  $0 $0 $0".
+        const apiList = data.tiers || [];
+        const hasPayout   = apiList.some(t => (t.per_lot || 0) > 0);
+        const uniqueGates = new Set(apiList.map(t => t.min_activations)).size;
+        const looksReal   = apiList.length > 0 && hasPayout && uniqueGates >= apiList.length;
+        if (looksReal) {
+          setTiers(buildTiers(apiList));
+        }
         if (data.qualification) {
           setQual({
             requires_kyc: data.qualification.requires_kyc ?? DEFAULT_QUALIFICATION.requires_kyc,
